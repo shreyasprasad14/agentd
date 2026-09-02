@@ -1,0 +1,22 @@
+# Go
+/agentd
+/bin/
+*.test
+*.out
+*.prof
+
+# Local env / secrets
+.env
+.env.*
+*.local
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+
+# Build artifacts
+dist/
