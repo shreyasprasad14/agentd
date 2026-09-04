@@ -16,11 +16,18 @@ import (
 	"time"
 
 	"github.com/shreyasprasad/agentd/internal/api"
+	"github.com/shreyasprasad/agentd/internal/model/local"
 	"github.com/shreyasprasad/agentd/internal/runtime"
 	"github.com/shreyasprasad/agentd/internal/store"
+	"github.com/shreyasprasad/agentd/internal/tools"
+	"github.com/shreyasprasad/agentd/internal/tools/builtin"
 )
 
-const defaultDSN = "postgres://agentd:agentd@localhost:5432/agentd?sslmode=disable"
+const (
+	defaultDSN      = "postgres://agentd:agentd@localhost:5432/agentd?sslmode=disable"
+	defaultModelURL = "http://localhost:11434/v1"
+	defaultModel    = "qwen2.5:7b"
+)
 
 func main() {
 	if err := run(); err != nil {
@@ -65,6 +72,12 @@ commands:
 `)
 }
 
+// registry is the builtin tool set. serve and work must agree on it: the API
+// fills a run's default allowlist from it, the worker dispatches through it.
+func registry() *tools.Registry {
+	return tools.NewRegistry().MustRegister(builtin.Finish{}, builtin.ComputeDeadline{})
+}
+
 func serve(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	addr := fs.String("addr", envOr("AGENTD_ADDR", ":8080"), "listen address")
@@ -82,7 +95,7 @@ func serve(ctx context.Context, args []string) error {
 	}
 	defer st.Close()
 
-	srv := api.NewServer(st, log, api.Options{PollInterval: *poll})
+	srv := api.NewServer(st, log, api.Options{PollInterval: *poll, Registry: registry()})
 	return srv.ListenAndServe(ctx, *addr)
 }
 
@@ -92,7 +105,10 @@ func work(ctx context.Context, args []string) error {
 	owner := fs.String("owner", os.Getenv("AGENTD_WORKER_OWNER"), "lease owner identity (default: hostname/random)")
 	poll := fs.Duration("poll", 250*time.Millisecond, "queue poll interval")
 	lease := fs.Duration("lease", 60*time.Second, "lease duration")
-	stepDelay := fs.Duration("step-delay", time.Second, "stub agent delay between events")
+	reaper := fs.Duration("reaper-interval", 0, "expired-lease sweep interval (default: lease/2)")
+	modelURL := fs.String("model-url", envOr("AGENTD_MODEL_URL", defaultModelURL), "OpenAI-compatible chat completions base URL (Ollama, llama.cpp)")
+	modelName := fs.String("model", envOr("AGENTD_MODEL", defaultModel), "default model when a run's agent_config names none")
+	modelTimeout := fs.Duration("model-timeout", 10*time.Minute, "per-call model timeout")
 	skipMigrate := fs.Bool("skip-migrate", false, "do not apply migrations at startup")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -105,11 +121,19 @@ func work(ctx context.Context, args []string) error {
 	}
 	defer st.Close()
 
+	provider := local.New(local.Config{
+		BaseURL: *modelURL,
+		APIKey:  os.Getenv("AGENTD_MODEL_API_KEY"),
+		Timeout: *modelTimeout,
+	})
 	w := runtime.NewWorker(st, log, runtime.WorkerConfig{
-		Owner:         *owner,
-		PollInterval:  *poll,
-		LeaseDuration: *lease,
-		StepDelay:     *stepDelay,
+		Owner:          *owner,
+		PollInterval:   *poll,
+		LeaseDuration:  *lease,
+		ReaperInterval: *reaper,
+		Provider:       provider,
+		Registry:       registry(),
+		DefaultModel:   *modelName,
 	})
 	return w.Run(ctx)
 }

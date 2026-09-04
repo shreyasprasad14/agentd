@@ -3,6 +3,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -18,9 +19,10 @@ import (
 
 	"github.com/shreyasprasad/agentd/internal/runtime"
 	"github.com/shreyasprasad/agentd/internal/store"
+	"github.com/shreyasprasad/agentd/internal/tools"
 )
 
-// Options tunes the SSE tailing behaviour.
+// Options tunes the server.
 type Options struct {
 	// PollInterval is how often a live SSE stream checks for new events.
 	// M0 polls; LISTEN/NOTIFY is the obvious upgrade once event volume matters.
@@ -28,6 +30,10 @@ type Options struct {
 	// KeepAlive is how often an idle stream emits an SSE comment so proxies
 	// do not reap the connection.
 	KeepAlive time.Duration
+	// Registry lists the tools workers offer. The API uses it to fill a
+	// run's default allowlist at submission and to serve GET /v1/tools.
+	// It must match what the workers register.
+	Registry *tools.Registry
 }
 
 func (o Options) withDefaults() Options {
@@ -36,6 +42,9 @@ func (o Options) withDefaults() Options {
 	}
 	if o.KeepAlive <= 0 {
 		o.KeepAlive = 15 * time.Second
+	}
+	if o.Registry == nil {
+		o.Registry = tools.NewRegistry()
 	}
 	return o
 }
@@ -62,11 +71,14 @@ func (s *Server) Router() http.Handler {
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
+	r.Get("/v1/tools", s.listTools)
 	r.Route("/v1/runs", func(r chi.Router) {
 		r.Post("/", s.createRun)
 		r.Get("/{id}", s.getRun)
 		r.Get("/{id}/events", s.listEvents)
 		r.Get("/{id}/stream", s.streamRun)
+		r.Post("/{id}/cancel", s.cancelRun)
+		r.Post("/{id}/resume", s.resumeRun)
 	})
 	return r
 }
@@ -101,8 +113,13 @@ func (s *Server) createRun(w http.ResponseWriter, r *http.Request) {
 	if req.BudgetUSD == "" {
 		req.BudgetUSD = "1.00"
 	}
+	cfg, err := s.normalizeConfig(req.AgentConfig)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "agent_config: "+err.Error())
+		return
+	}
 
-	run, err := s.store.CreateRun(r.Context(), req.Goal, req.AgentConfig, req.MaxSteps, req.BudgetUSD)
+	run, err := s.store.CreateRun(r.Context(), req.Goal, cfg, req.MaxSteps, req.BudgetUSD)
 	if err != nil {
 		s.log.Error("create run", "error", err)
 		writeError(w, http.StatusInternalServerError, "could not create run")
@@ -112,12 +129,115 @@ func (s *Server) createRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, CreateRunResponse{ID: run.ID, Status: run.Status})
 }
 
+// normalizeConfig validates agent_config strictly and fixes the tool
+// allowlist at submission time (spec §10): a run that names no tools gets
+// every registered tool, and one that names unknown tools is rejected.
+func (s *Server) normalizeConfig(raw json.RawMessage) (json.RawMessage, error) {
+	var cfg runtime.AgentConfig
+	if len(raw) > 0 {
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&cfg); err != nil {
+			return nil, err
+		}
+	}
+	if cfg.Tools == nil {
+		cfg.Tools = s.opts.Registry.Names()
+	}
+	for _, name := range cfg.Tools {
+		if _, ok := s.opts.Registry.Get(name); !ok {
+			return nil, fmt.Errorf("unknown tool %q", name)
+		}
+	}
+	if cfg.ToolDelayMS < 0 {
+		return nil, errors.New("tool_delay_ms must not be negative")
+	}
+	return json.Marshal(cfg)
+}
+
+// RunResponse is GET /v1/runs/:id: the row plus the reduced event log.
+type RunResponse struct {
+	Run   *store.Run     `json:"run"`
+	State *runtime.State `json:"state"`
+}
+
 func (s *Server) getRun(w http.ResponseWriter, r *http.Request) {
 	run, ok := s.lookupRun(w, r)
 	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, run)
+	events, err := s.store.ListEvents(r.Context(), run.ID, 0)
+	if err != nil {
+		s.log.Error("list events", "run_id", run.ID, "error", err)
+		writeError(w, http.StatusInternalServerError, "could not load events")
+		return
+	}
+	state, err := runtime.Reduce(events)
+	if err != nil {
+		s.log.Error("reduce", "run_id", run.ID, "error", err)
+		writeError(w, http.StatusInternalServerError, "could not reduce event log")
+		return
+	}
+	writeJSON(w, http.StatusOK, RunResponse{Run: run, State: &state})
+}
+
+// cancelRun sets the cooperative cancel flag; the worker finishes the run
+// as cancelled at its next loop iteration.
+func (s *Server) cancelRun(w http.ResponseWriter, r *http.Request) {
+	run, ok := s.lookupRun(w, r)
+	if !ok {
+		return
+	}
+	ok, err := s.store.RequestCancel(r.Context(), run.ID)
+	if err != nil {
+		s.log.Error("cancel run", "run_id", run.ID, "error", err)
+		writeError(w, http.StatusInternalServerError, "could not cancel run")
+		return
+	}
+	if !ok {
+		writeError(w, http.StatusConflict, "run already finished")
+		return
+	}
+	s.log.Info("cancel requested", "run_id", run.ID)
+	writeJSON(w, http.StatusAccepted, map[string]any{"id": run.ID, "cancel_requested": true})
+}
+
+// resumeRun force-releases a run's lease so any worker can pick it up. It
+// is the manual override for a run stuck on a worker that still heartbeats.
+func (s *Server) resumeRun(w http.ResponseWriter, r *http.Request) {
+	run, ok := s.lookupRun(w, r)
+	if !ok {
+		return
+	}
+	ok, err := s.store.ReleaseLease(r.Context(), run.ID)
+	if err != nil {
+		s.log.Error("resume run", "run_id", run.ID, "error", err)
+		writeError(w, http.StatusInternalServerError, "could not resume run")
+		return
+	}
+	if !ok {
+		writeError(w, http.StatusConflict, "run already finished")
+		return
+	}
+	s.log.Info("run released for resume", "run_id", run.ID, "previous_owner", run.LeaseOwner)
+	writeJSON(w, http.StatusAccepted, map[string]any{"id": run.ID, "status": runtime.StatusQueued})
+}
+
+// ToolInfo is one entry of GET /v1/tools.
+type ToolInfo struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	TrustTier   tools.TrustTier `json:"trust_tier"`
+	Schema      json.RawMessage `json:"input_schema"`
+}
+
+func (s *Server) listTools(w http.ResponseWriter, r *http.Request) {
+	list := s.opts.Registry.List()
+	out := make([]ToolInfo, 0, len(list))
+	for _, t := range list {
+		out = append(out, ToolInfo{Name: t.Name(), Description: t.Description(), TrustTier: t.TrustTier(), Schema: t.Schema()})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"tools": out})
 }
 
 func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {

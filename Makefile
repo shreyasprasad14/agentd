@@ -1,7 +1,9 @@
 COMPOSE := docker compose -f deploy/docker-compose.yml
 DSN ?= postgres://agentd:agentd@localhost:5432/agentd?sslmode=disable
+MODEL ?= qwen2.5:7b
+MODEL_URL ?= http://localhost:11434/v1
 
-.PHONY: build test test-short up down logs migrate serve work demo fmt vet
+.PHONY: build test test-short test-live up down logs migrate serve work demo crash-demo model-pull fmt vet
 
 build:
 	go build ./...
@@ -13,6 +15,10 @@ test:
 ## test-short skips anything that needs Docker.
 test-short:
 	go test ./... -short
+
+## test-live runs the opt-in test against a real local model (needs Ollama + the model pulled).
+test-live:
+	AGENTD_LIVE_MODEL=1 AGENTD_MODEL_URL=$(MODEL_URL) AGENTD_MODEL=$(MODEL) AGENTD_HTTP_DEBUG=1 go test ./internal/model/local -run TestLive -v -count=1
 
 fmt:
 	gofmt -l -w .
@@ -36,13 +42,21 @@ serve:
 	go run ./cmd/agentd serve -dsn "$(DSN)"
 
 work:
-	go run ./cmd/agentd work -dsn "$(DSN)"
+	go run ./cmd/agentd work -dsn "$(DSN)" -model-url "$(MODEL_URL)" -model "$(MODEL)"
+
+## model-pull fetches the default local model into Ollama.
+model-pull:
+	ollama pull $(MODEL)
 
 ## demo submits a run against a locally running API and tails its SSE stream.
 demo:
 	@id=$$(curl -s -X POST localhost:8080/v1/runs \
 		-H 'content-type: application/json' \
-		-d '{"goal":"what is the holding in the stub opinion?"}' \
-		| sed -n 's/.*"id":"\([^"]*\)".*/\1/p'); \
+		-d '{"goal":"A motion was served on 2026-09-03. Use compute_deadline to find the date 30 weekdays later, skipping weekends, then call finish with the answer."}' \
+		| jq -r .id); \
 	echo "run $$id"; \
 	curl -N "localhost:8080/v1/runs/$$id/stream"
+
+## crash-demo kills a worker mid-tool-call and shows a second worker resume the run.
+crash-demo:
+	DSN="$(DSN)" MODEL_URL="$(MODEL_URL)" MODEL="$(MODEL)" ./scripts/crash-demo.sh

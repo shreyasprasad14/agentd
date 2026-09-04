@@ -2,7 +2,6 @@ package runtime
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"os"
@@ -10,7 +9,9 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/shreyasprasad/agentd/internal/model"
 	"github.com/shreyasprasad/agentd/internal/store"
+	"github.com/shreyasprasad/agentd/internal/tools"
 )
 
 // WorkerConfig tunes queue polling and leasing.
@@ -23,8 +24,15 @@ type WorkerConfig struct {
 	// LeaseDuration is how long a claim is valid without a heartbeat. A
 	// kill -9'd worker's runs become claimable again after this window.
 	LeaseDuration time.Duration
-	// StepDelay is the pause the stub agent takes between events.
-	StepDelay time.Duration
+	// ReaperInterval is how often expired leases are swept back to the
+	// queue. Defaults to half the lease duration.
+	ReaperInterval time.Duration
+	// Provider is the model backend. Required.
+	Provider model.Provider
+	// Registry holds the tools runs may be granted. Required.
+	Registry *tools.Registry
+	// DefaultModel is used when a run's agent_config has no model.
+	DefaultModel string
 }
 
 func (c WorkerConfig) withDefaults() WorkerConfig {
@@ -41,8 +49,11 @@ func (c WorkerConfig) withDefaults() WorkerConfig {
 	if c.LeaseDuration <= 0 {
 		c.LeaseDuration = 60 * time.Second
 	}
-	if c.StepDelay <= 0 {
-		c.StepDelay = time.Second
+	if c.ReaperInterval <= 0 {
+		c.ReaperInterval = c.LeaseDuration / 2
+	}
+	if c.Registry == nil {
+		c.Registry = tools.NewRegistry()
 	}
 	return c
 }
@@ -52,15 +63,27 @@ type Worker struct {
 	store *store.Store
 	log   *slog.Logger
 	cfg   WorkerConfig
+	loop  *Loop
 }
 
-// NewWorker builds a Worker. A nil logger falls back to the default.
+// NewWorker builds a Worker. A nil logger falls back to the default. It
+// panics without a Provider, since a worker that cannot call a model is a
+// misconfiguration, not a runtime condition.
 func NewWorker(st *store.Store, log *slog.Logger, cfg WorkerConfig) *Worker {
 	cfg = cfg.withDefaults()
+	if cfg.Provider == nil {
+		panic("runtime.NewWorker: Provider is required")
+	}
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Worker{store: st, log: log.With("worker", cfg.Owner), cfg: cfg}
+	log = log.With("worker", cfg.Owner)
+	return &Worker{
+		store: st,
+		log:   log,
+		cfg:   cfg,
+		loop:  NewLoop(st, cfg.Provider, cfg.Registry, log, cfg.Owner, cfg.DefaultModel),
+	}
 }
 
 // Owner is this worker's lease identity.
@@ -68,14 +91,17 @@ func (w *Worker) Owner() string { return w.cfg.Owner }
 
 // Run polls the queue until ctx is cancelled.
 func (w *Worker) Run(ctx context.Context) error {
-	w.log.Info("worker started", "poll_interval", w.cfg.PollInterval, "lease", w.cfg.LeaseDuration)
+	w.log.Info("worker started", "poll_interval", w.cfg.PollInterval, "lease", w.cfg.LeaseDuration,
+		"provider", w.cfg.Provider.Name(), "model", w.cfg.DefaultModel, "tools", w.cfg.Registry.Names())
+	go w.reaper(ctx)
+
 	ticker := time.NewTicker(w.cfg.PollInterval)
 	defer ticker.Stop()
 
 	for {
 		claimed, err := w.claimAndExecute(ctx)
 		switch {
-		case errors.Is(err, context.Canceled):
+		case IsShutdown(err) || ctx.Err() != nil:
 			return nil
 		case err != nil:
 			w.log.Error("claim/execute", "error", err)
@@ -101,23 +127,35 @@ func (w *Worker) claimAndExecute(ctx context.Context) (bool, error) {
 
 	execCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	go w.heartbeat(execCtx, run.ID)
+	go w.heartbeat(execCtx, run.ID, cancel)
 
-	if err := w.executeStub(execCtx, run); err != nil {
-		if ctx.Err() != nil {
-			// Shutting down: leave the lease to expire so another worker
-			// resumes the run. This is the crash-recovery path.
+	err = w.loop.Execute(execCtx, run)
+	switch {
+	case err == nil:
+		return true, nil
+	case ctx.Err() != nil:
+		// Shutting down: leave the lease to expire so another worker
+		// resumes the run. This is the crash-recovery path.
+		w.log.Info("shutdown mid-run, leaving lease", "run_id", run.ID)
+		return true, nil
+	case errors.Is(err, store.ErrLeaseLost):
+		w.log.Warn("lease lost mid-run, another worker owns it", "run_id", run.ID)
+		return true, nil
+	default:
+		w.log.Error("run failed", "run_id", run.ID, "error", err)
+		ferr := w.loop.finish(context.WithoutCancel(ctx), run.ID, StatusFailed, "", err.Error())
+		if errors.Is(ferr, store.ErrLeaseLost) {
 			return true, nil
 		}
-		w.log.Error("run failed", "run_id", run.ID, "error", err)
-		return true, w.finish(context.WithoutCancel(ctx), run.ID, "failed", err.Error())
+		return true, ferr
 	}
-	return true, nil
 }
 
 // heartbeat renews the lease at a third of its duration so a brief stall does
-// not hand the run to another worker.
-func (w *Worker) heartbeat(ctx context.Context, runID uuid.UUID) {
+// not hand the run to another worker. If the lease is gone anyway, it cancels
+// execution: the fenced store rejects our writes from here on, and stopping
+// early avoids doing tool work whose result can never be committed.
+func (w *Worker) heartbeat(ctx context.Context, runID uuid.UUID, lost context.CancelFunc) {
 	ticker := time.NewTicker(w.cfg.LeaseDuration / 3)
 	defer ticker.Stop()
 	for {
@@ -130,69 +168,35 @@ func (w *Worker) heartbeat(ctx context.Context, runID uuid.UUID) {
 				w.log.Warn("heartbeat failed", "run_id", runID, "error", err)
 			}
 			if err == nil && !ok {
-				w.log.Warn("lease lost", "run_id", runID)
+				w.log.Warn("lease lost, cancelling execution", "run_id", runID)
+				lost()
 				return
 			}
 		}
 	}
 }
 
-// executeStub is the M0 stand-in for the agent loop: three canned events with
-// a delay between them, enough to prove the log and the SSE tail. M1 replaces
-// this with load events -> reduce -> model call -> tool calls.
-func (w *Worker) executeStub(ctx context.Context, run *store.Run) error {
-	config := run.AgentConfig
-	if len(config) == 0 {
-		config = json.RawMessage(`{}`)
+// reaper sweeps expired leases back to the queue. ClaimRun would find them
+// regardless; the sweep makes the hand-off visible in the logs and, from M4,
+// in a metric.
+func (w *Worker) reaper(ctx context.Context) {
+	ticker := time.NewTicker(w.cfg.ReaperInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			n, err := w.store.ReapExpiredLeases(ctx)
+			if err != nil && ctx.Err() == nil {
+				w.log.Warn("reaper failed", "error", err)
+				continue
+			}
+			if n > 0 {
+				w.log.Info("requeued runs with expired leases", "count", n)
+			}
+		}
 	}
-
-	if _, err := w.store.AppendEvent(ctx, run.ID, EventRunStarted, map[string]any{
-		"goal":         run.Goal,
-		"agent_config": config,
-		"max_steps":    run.MaxSteps,
-		"budget_usd":   run.BudgetUSD,
-		"worker":       w.cfg.Owner,
-	}); err != nil {
-		return err
-	}
-
-	if err := sleep(ctx, w.cfg.StepDelay); err != nil {
-		return err
-	}
-
-	if _, err := w.store.AppendEvent(ctx, run.ID, EventModelResponded, map[string]any{
-		"model": "stub",
-		"content": []map[string]string{
-			{"type": "text", "text": "stub response for goal: " + run.Goal},
-		},
-		"stop_reason": "end_turn",
-		"usage":       map[string]int{"input_tokens": 0, "output_tokens": 0},
-	}); err != nil {
-		return err
-	}
-
-	if err := sleep(ctx, w.cfg.StepDelay); err != nil {
-		return err
-	}
-
-	return w.finish(ctx, run.ID, "succeeded", "stub response for goal: "+run.Goal)
-}
-
-// finish sets the terminal status before appending run_finished, so a client
-// that sees the final event and immediately re-reads the run never observes a
-// finished log against a still-running status.
-func (w *Worker) finish(ctx context.Context, runID uuid.UUID, status, finalAnswer string) error {
-	if err := w.store.FinishRun(ctx, runID, status); err != nil {
-		return err
-	}
-	if _, err := w.store.AppendEvent(ctx, runID, EventRunFinished, map[string]any{
-		"status":       status,
-		"final_answer": finalAnswer,
-	}); err != nil {
-		return err
-	}
-	w.log.Info("run finished", "run_id", runID, "status", status)
-	return nil
 }
 
 func sleep(ctx context.Context, d time.Duration) error {
