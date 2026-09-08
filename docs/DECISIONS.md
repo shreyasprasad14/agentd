@@ -110,3 +110,58 @@ iteration rather than folding new events into an in-memory state.
 exercised on every step of every run rather than only in the crash test. It removes an entire
 class of "in-memory state drifted from the log" bugs, one of which the M1 test suite caught in
 the incremental version. One indexed query per step is free at this scale.
+
+## ADR-10: One worker, several backends, routed by model name
+
+**Decision.** The worker's `Provider` is a `model.Router` over the local runtime and the
+Anthropic API. `agent_config.model` selects the backend: an explicit `anthropic/…` or
+`local/…` prefix, a bare `claude-*` id for Anthropic, anything else for local. The router
+tags each response with the backend that answered (`Response.Provider`) and prices it by the
+same resolution rule.
+
+**Why.** The alternative, a `-provider` flag per worker process, makes provider a property of
+the queue rather than of the run: a Claude run would sit behind local-only workers until one
+with the right flag came along, and the spec's "per-run model override" would need a second
+queue. Putting the choice in the model string keeps one queue, one worker binary, and one
+snapshot (`run_started.agent_config`) that says exactly what a run was configured to talk to.
+The only loop change is reading the provider name from the response instead of the interface.
+
+**Cost.** The API cannot validate the model string at submission (it has no provider
+knowledge, by design); an unroutable model fails at the worker with a clear error after the
+loop's bounded retries.
+
+## ADR-11: Thinking blocks are stored verbatim and never interpreted
+
+**Decision.** `thinking` and `redacted_thinking` are content block types on the canonical
+`ContentBlock`, with `thinking`, `signature`, and `data` fields. The reducer keeps them in the
+assistant turn byte-for-byte; the Anthropic provider echoes them on the next call; the local
+provider and the loop ignore them.
+
+**Why.** Current Claude models reason before answering and return signed thinking blocks. When
+a reasoning turn calls a tool, the next request must carry that turn back exactly, signature
+and all, or the API rejects it. The event log is the only place the turn lives after a crash,
+so the blocks have to be in the log. Storing them as opaque blocks rather than a provider-
+specific side channel keeps `model_responded` provider-independent (ADR-2): the reducer's
+fold does not know or care which backend produced the turn. It also means thinking summaries
+(with `-anthropic-thinking-display summarized`) are in the trajectory for the M6 viewer for
+free.
+
+**Boundary.** The runtime never edits history: it only appends. That is exactly the shape the
+API's signature checks assume, so nothing here has to change when those checks tighten.
+
+## ADR-12: An unpriced model cannot be called, and a refusal is an error
+
+**Decision.** The Anthropic provider refuses to call a model with no entry in its price table
+(longest-prefix match on the model id, operator-extensible with `-anthropic-prices`). A
+response with `stop_reason: refusal` is returned as `*anthropic.RefusalError`, not as a
+`Response`.
+
+**Why.** Budget enforcement is only as honest as the cost it sees. Pricing an unknown model at
+$0 would let a run spend without limit, which is the exact failure the budget exists to
+prevent; refusing up front is loud and cheap. Likewise a refusal has no tool calls and usually
+no text, so surfacing it as a normal response would finish the run "succeeded" with an empty
+answer. As an error it fails the run with the policy category in `run_finished.error`.
+
+**Cost.** The loop retries every provider error three times, so a refusal or an unknown model
+costs a few seconds and, for a refusal, up to three calls before the run fails. A typed
+non-retryable error is a small M4 follow-up once the loop grows a metric for it.

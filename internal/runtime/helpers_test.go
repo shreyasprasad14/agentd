@@ -92,13 +92,19 @@ func newFixture(t *testing.T, provider *fake.Provider) *fixture {
 // cancels the context without any cleanup, which is exactly what a kill -9
 // looks like from Postgres' point of view: the lease is left behind.
 func (f *fixture) startWorker(owner string, lease time.Duration) (stop func()) {
+	return f.startWorkerWith(f.provider, owner, lease)
+}
+
+// startWorkerWith is startWorker with an explicit provider, for tests that
+// stand a Router in front of several fakes.
+func (f *fixture) startWorkerWith(provider model.Provider, owner string, lease time.Duration) (stop func()) {
 	ctx, cancel := context.WithCancel(context.Background())
 	w := runtime.NewWorker(f.st, nil, runtime.WorkerConfig{
 		Owner:          owner,
 		PollInterval:   50 * time.Millisecond,
 		LeaseDuration:  lease,
 		ReaperInterval: 200 * time.Millisecond,
-		Provider:       f.provider,
+		Provider:       provider,
 		Registry:       f.registry,
 		DefaultModel:   "fake-model",
 	})
@@ -119,6 +125,7 @@ type runOpts struct {
 	maxSteps  int32
 	budget    string
 	toolDelay int
+	model     string
 }
 
 func (f *fixture) submit(goal string, o runOpts) uuid.UUID {
@@ -132,7 +139,7 @@ func (f *fixture) submit(goal string, o runOpts) uuid.UUID {
 	if o.budget == "" {
 		o.budget = "1.00"
 	}
-	cfg, err := json.Marshal(runtime.AgentConfig{Tools: o.tools, ToolDelayMS: o.toolDelay})
+	cfg, err := json.Marshal(runtime.AgentConfig{Model: o.model, Tools: o.tools, ToolDelayMS: o.toolDelay})
 	require.NoError(f.t, err)
 	run, err := f.st.CreateRun(context.Background(), goal, cfg, o.maxSteps, o.budget)
 	require.NoError(f.t, err)

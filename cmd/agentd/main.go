@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/shreyasprasad/agentd/internal/api"
+	"github.com/shreyasprasad/agentd/internal/model"
+	"github.com/shreyasprasad/agentd/internal/model/anthropic"
 	"github.com/shreyasprasad/agentd/internal/model/local"
 	"github.com/shreyasprasad/agentd/internal/runtime"
 	"github.com/shreyasprasad/agentd/internal/store"
@@ -107,25 +109,29 @@ func work(ctx context.Context, args []string) error {
 	lease := fs.Duration("lease", 60*time.Second, "lease duration")
 	reaper := fs.Duration("reaper-interval", 0, "expired-lease sweep interval (default: lease/2)")
 	modelURL := fs.String("model-url", envOr("AGENTD_MODEL_URL", defaultModelURL), "OpenAI-compatible chat completions base URL (Ollama, llama.cpp)")
-	modelName := fs.String("model", envOr("AGENTD_MODEL", defaultModel), "default model when a run's agent_config names none")
+	modelName := fs.String("model", envOr("AGENTD_MODEL", defaultModel),
+		"default model when a run's agent_config names none; \"anthropic/...\" or a bare \"claude-*\" name routes to Anthropic, anything else to the local runtime")
 	modelTimeout := fs.Duration("model-timeout", 10*time.Minute, "per-call model timeout")
+	anthropicPrices := fs.String("anthropic-prices", os.Getenv("AGENTD_ANTHROPIC_PRICES"),
+		"extra Anthropic prices as model=input/output in USD per million tokens, comma separated (models without a price cannot be called)")
+	thinkingDisplay := fs.String("anthropic-thinking-display", os.Getenv("AGENTD_ANTHROPIC_THINKING_DISPLAY"),
+		"\"summarized\" records readable thinking summaries in the event log, \"omitted\" only signatures; empty takes the model default")
 	skipMigrate := fs.Bool("skip-migrate", false, "do not apply migrations at startup")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
 	log := newLogger("work")
+	provider, err := buildProvider(*modelURL, *modelTimeout, *anthropicPrices, *thinkingDisplay, log)
+	if err != nil {
+		return err
+	}
 	st, err := open(ctx, *dsn, log, !*skipMigrate)
 	if err != nil {
 		return err
 	}
 	defer st.Close()
 
-	provider := local.New(local.Config{
-		BaseURL: *modelURL,
-		APIKey:  os.Getenv("AGENTD_MODEL_API_KEY"),
-		Timeout: *modelTimeout,
-	})
 	w := runtime.NewWorker(st, log, runtime.WorkerConfig{
 		Owner:          *owner,
 		PollInterval:   *poll,
@@ -136,6 +142,38 @@ func work(ctx context.Context, args []string) error {
 		DefaultModel:   *modelName,
 	})
 	return w.Run(ctx)
+}
+
+// buildProvider wires the local runtime and Anthropic behind one Router. The
+// local backend is the default; Anthropic claims "anthropic/..." and bare
+// "claude-*" model names. Anthropic is always registered: credentials are
+// only needed once a run actually targets it, and a missing key then fails
+// that run with a clear authentication error rather than the whole worker.
+func buildProvider(modelURL string, timeout time.Duration, prices, thinkingDisplay string, log *slog.Logger) (model.Provider, error) {
+	extra, err := anthropic.ParsePrices(prices)
+	if err != nil {
+		return nil, fmt.Errorf("-anthropic-prices: %w", err)
+	}
+	switch thinkingDisplay {
+	case "", "summarized", "omitted":
+	default:
+		return nil, fmt.Errorf("-anthropic-thinking-display: want summarized or omitted, got %q", thinkingDisplay)
+	}
+	onBox := local.New(local.Config{
+		BaseURL: modelURL,
+		APIKey:  os.Getenv("AGENTD_MODEL_API_KEY"),
+		Timeout: timeout,
+	})
+	hosted := anthropic.New(anthropic.Config{
+		Timeout:         timeout,
+		Price:           extra,
+		ThinkingDisplay: thinkingDisplay,
+	})
+	log.Info("model backends", "local", modelURL, "anthropic_api_key_set", os.Getenv("ANTHROPIC_API_KEY") != "",
+		"anthropic_extra_prices", len(extra))
+	return model.NewRouter().
+		Register("local", onBox, nil).
+		Register("anthropic", hosted, anthropic.IsClaudeModel), nil
 }
 
 func migrate(ctx context.Context, args []string) error {

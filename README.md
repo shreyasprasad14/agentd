@@ -2,7 +2,7 @@
 
 A control plane for running LLM agents as durable, resumable, sandboxed, observable jobs.
 
-**Status: M1 (real loop + durability) complete.** Sandbox, retrieval, tracing, and evals are
+**Status: M1.5 (second model provider) complete.** Sandbox, retrieval, tracing, and evals are
 not implemented yet.
 
 ## M1 — Real loop + durability
@@ -40,9 +40,37 @@ call was repeated, and that the second worker's model request contained the full
 conversation. A sibling test crashes mid-model-call instead. `scripts/crash-demo.sh` does the
 same thing by hand against a real local model.
 
+## M1.5 — Second model provider
+
+Claude plugs into the same `ModelProvider` seam through the official Anthropic Go SDK, in
+`internal/model/anthropic`. Because the canonical message format was already content blocks
+(ADR-2), the translation is close to one-to-one; the loop, the reducer, and the event schema did
+not change. What a hosted API adds over a local one is what M1.5 is really about:
+
+- **Real money through the budget path.** The provider carries a price table (USD per million
+  tokens, cache reads and writes included) and prices every response in micro-USD, so
+  `spent_usd` moves and the `budget_exceeded` termination is exercised for real. A model with
+  no price entry is refused before the call is made, rather than silently billed at $0 and
+  allowed past its budget. Extra models are added with `-anthropic-prices`.
+- **Thinking blocks round-trip through the log.** Current Claude models reason before they
+  answer and return signed `thinking` blocks that must be sent back unchanged when a reasoning
+  turn calls a tool. Those blocks are two new content block types stored verbatim in
+  `model_responded`; the reducer passes them through and the provider echoes them. `-anthropic-
+  thinking-display summarized` records readable summaries of the reasoning in the event log.
+- **Refusals are errors, not answers.** A `stop_reason: refusal` fails the run with the policy
+  category rather than finishing it with an empty final answer.
+
+One worker serves both backends. A `model.Router` picks the provider from the model name:
+`anthropic/claude-opus-5` or `local/qwen2.5:7b` explicitly, a bare `claude-*` name implicitly,
+anything else goes to the local runtime. So `agent_config.model` on a run is the per-run
+provider override the spec asked for, and `model_responded.provider` records which backend
+actually answered. `make compare` submits one goal to both and diffs the trajectories.
+
 ## Quickstart
 
-You need Docker, Go 1.25, and [Ollama](https://ollama.com) on the host.
+You need Docker, Go 1.25, and [Ollama](https://ollama.com) on the host. For Claude, export
+`ANTHROPIC_API_KEY` before `make up` (or `make work`); without it local runs are unaffected and
+runs that target Claude fail with an authentication error.
 
 ```bash
 brew install ollama && ollama serve &   # or the desktop app
@@ -69,6 +97,17 @@ curl -N localhost:8080/v1/runs/<id>/stream
 
 `make demo` does the submit-and-tail in one step. Resume a dropped stream from where it
 left off with `-H 'Last-Event-ID: 5'`.
+
+The same run against Claude, with a budget the spend counter can be seen moving against:
+
+```bash
+curl -X POST localhost:8080/v1/runs \
+  -H 'content-type: application/json' \
+  -d '{"goal":"...","agent_config":{"model":"anthropic/claude-opus-5"},"budget_usd":"0.50"}'
+```
+
+`make demo-anthropic` does that; `make compare` runs one goal against both providers and
+prints the two trajectories side by side.
 
 ### The crash demo
 
@@ -97,8 +136,11 @@ make work        # worker, in a second shell; talks to Ollama on localhost:11434
 
 Both `serve` and `work` apply migrations at startup (advisory-locked, so racing them is safe)
 and retry the initial connection for 30s. Worker flags: `-model-url`, `-model`, `-lease`,
-`-reaper-interval`, `-owner`. Env equivalents: `AGENTD_MODEL_URL`, `AGENTD_MODEL`,
-`AGENTD_DSN`, `AGENTD_WORKER_OWNER`.
+`-reaper-interval`, `-owner`, `-anthropic-prices`, `-anthropic-thinking-display`. Env
+equivalents: `AGENTD_MODEL_URL`, `AGENTD_MODEL`, `AGENTD_DSN`, `AGENTD_WORKER_OWNER`,
+`AGENTD_ANTHROPIC_PRICES`, `AGENTD_ANTHROPIC_THINKING_DISPLAY`. Credentials for Claude come
+from `ANTHROPIC_API_KEY` (or a profile from `ant auth login`); `-model claude-opus-5` makes
+Claude the default for runs that name no model.
 
 ## Endpoints
 
@@ -113,9 +155,10 @@ and retry the initial connection for 30s. Worker flags: `-model-url`, `-model`, 
 | `GET` | `/v1/tools` | registry listing with schemas and trust tiers |
 | `GET` | `/healthz` | liveness |
 
-`agent_config` fields: `model`, `system_prompt`, `tools` (allowlist; defaults to every
-registered tool and is fixed at submission), `max_tokens`, `tool_delay_ms` (demo only).
-Unknown fields and unknown tool names are rejected with 400.
+`agent_config` fields: `model` (picks the provider too: `anthropic/<id>`, `local/<name>`, a
+bare `claude-*` id, or anything else for the local runtime), `system_prompt`, `tools`
+(allowlist; defaults to every registered tool and is fixed at submission), `max_tokens`,
+`tool_delay_ms` (demo only). Unknown fields and unknown tool names are rejected with 400.
 
 ## Event log
 
@@ -123,7 +166,7 @@ Unknown fields and unknown tool names are rejected with 400.
 |---|---|
 | `run_started` | goal, agent config snapshot, max_steps, budget, worker |
 | `model_requested` | step, model, sha256 of the request, params |
-| `model_responded` | step, provider, model, content blocks, stop_reason, usage, cost_micro_usd |
+| `model_responded` | step, provider, model, content blocks (text, tool_use, and any thinking blocks, kept verbatim), stop_reason, usage (with cache token counts), cost_micro_usd |
 | `tool_requested` | tool_use_id, name, args (its seq keys the `tool_calls` ledger) |
 | `tool_succeeded` | tool_use_id, name, result, duration_ms, exit_code, replayed |
 | `tool_failed` | tool_use_id, name, error, retryable |
@@ -138,10 +181,17 @@ worse than one that refuses.
 ## Tests
 
 ```bash
-make test        # unit + testcontainers integration tests; requires Docker
-make test-short  # unit tests only
-make test-live   # one real call to Ollama; requires the model pulled
+make test                 # unit + testcontainers integration tests; requires Docker
+make test-short           # unit tests only
+make test-live            # one real call to Ollama; requires the model pulled
+make test-live-anthropic  # two real calls to Claude (a tool call, then the tool result
+                          # with the thinking turn echoed back); needs ANTHROPIC_API_KEY
 ```
+
+The Anthropic provider's unit tests point the real SDK client at an `httptest` server, so the
+wire body is asserted exactly: thinking blocks echoed in order, tool schemas passed through with
+every keyword, cache tokens priced. The loop's router test runs two fakes behind a `Router` and
+checks each run is priced and labelled by the backend that answered it.
 
 ## Layout
 
@@ -149,11 +199,12 @@ make test-live   # one real call to Ollama; requires the model pulled
 cmd/agentd/            # serve | work | migrate
 internal/api/          # handlers, SSE tail, config normalisation
 internal/runtime/      # event payloads, Reduce, the loop, worker (claim/heartbeat/reaper)
-internal/model/        # Provider interface, pricing; local/ (OpenAI-compatible), fake/ (tests)
+internal/model/        # Provider interface, pricing, Router; local/ (OpenAI-compatible), anthropic/ (Claude), fake/ (tests)
 internal/tools/        # Tool interface, registry + schema validation; builtin/ (finish, compute_deadline)
 internal/store/        # Postgres access, fenced writes, ledger, embedded migrations
 internal/testutil/     # shared testcontainers Postgres fixture
 scripts/crash-demo.sh  # the kill -9 demo
+scripts/compare-providers.sh  # one goal, both providers, trajectories side by side
 docs/DECISIONS.md      # ADRs
 docs/plans/            # per-milestone plans
 deploy/                # docker-compose.yml, Dockerfile
@@ -164,7 +215,8 @@ deploy/                # docker-compose.yml, Dockerfile
 See [docs/DECISIONS.md](docs/DECISIONS.md) for the ADRs: Postgres as the queue, content
 blocks as the canonical message format, OpenAI-compatible local provider, at-least-once model
 calls vs exactly-once tool calls, lease fencing, micro-USD cost accounting, the reaper,
-submission-time allowlists, and reduce-every-iteration.
+submission-time allowlists, reduce-every-iteration, provider routing by model name, thinking
+blocks as opaque log content, and refusing to call an unpriced model.
 
 Earlier notes from M0 still hold: hand-written pgx rather than sqlc while the schema moves;
 SSE polls the log at 200ms rather than `LISTEN/NOTIFY`; the terminal status and

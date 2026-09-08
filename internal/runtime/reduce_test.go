@@ -102,6 +102,25 @@ func TestReduceDanglingModelRequest(t *testing.T) {
 	require.Len(t, s.Messages, 1, "no assistant turn yet")
 }
 
+// TestReduceKeepsThinkingBlocks: a reasoning provider's thinking blocks are
+// part of the assistant turn and must come back out of the log byte-for-byte
+// (the Anthropic API rejects a continued tool turn whose thinking was
+// dropped or edited). The reducer neither interprets nor strips them.
+func TestReduceKeepsThinkingBlocks(t *testing.T) {
+	thinking := model.ContentBlock{Type: model.BlockThinking, Thinking: "", Signature: "sig-1"}
+	redacted := model.ContentBlock{Type: model.BlockRedactedThinking, Data: "opaque"}
+	use := toolUse("t1", "compute_deadline", `{"start_date":"2026-09-03","days":30}`)
+	s, err := Reduce([]store.Event{
+		ev(1, EventRunStarted, started()),
+		ev(2, EventModelRequested, ModelRequestedPayload{Step: 1, Model: "m"}),
+		ev(3, EventModelResponded, responded(1, model.Usage{InputTokens: 10, OutputTokens: 4}, 0, thinking, redacted, use)),
+	})
+	require.NoError(t, err)
+	require.Equal(t, []model.ContentBlock{thinking, redacted, use}, s.Messages[1].Content)
+	require.Len(t, s.OpenToolUses, 1, "thinking blocks are not tool uses")
+	require.Equal(t, "t1", s.OpenToolUses[0].ToolUseID)
+}
+
 func TestReduceToolLifecycle(t *testing.T) {
 	base := []store.Event{
 		ev(1, EventRunStarted, started()),

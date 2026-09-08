@@ -202,6 +202,49 @@ func TestLoopCancelRequested(t *testing.T) {
 	require.Equal(t, 0, f.provider.Calls())
 }
 
+// TestLoopRoutesByModel is the M1.5 shape: one worker, two backends behind a
+// Router, and agent_config.model deciding which one a run talks to. The
+// event log names the real backend and the run is priced at that backend's
+// rates, with no change to the loop beyond reading Response.Provider.
+func TestLoopRoutesByModel(t *testing.T) {
+	local := fake.New(finishCall("t1", "from local")).WithName("local")
+	claude := fake.New(finishCall("t2", "from claude")).WithName("anthropic").
+		WithPrice(model.Price{InputPerMTok: 5_000_000}) // $5/MTok in, nothing out: 100 tokens = 500 µUSD
+	router := model.NewRouter().
+		Register("local", local, nil).
+		Register("anthropic", claude, func(m string) bool { return strings.HasPrefix(m, "claude-") })
+
+	f := newFixture(t, local)
+	stop := f.startWorkerWith(router, "w1", 10*time.Second)
+	defer stop()
+
+	hosted := f.submit("go hosted", runOpts{model: "anthropic/claude-opus-5"})
+	onBox := f.submit("stay local", runOpts{})
+
+	hostedRun := f.waitTerminal(hosted)
+	onBoxRun := f.waitTerminal(onBox)
+	require.Equal(t, runtime.StatusSucceeded, hostedRun.Status)
+	require.Equal(t, runtime.StatusSucceeded, onBoxRun.Status)
+	require.Equal(t, "0.0005", hostedRun.SpentUSD, "priced at the hosted backend's rate")
+	require.Equal(t, "0.0000", onBoxRun.SpentUSD)
+
+	hostedResp := decode[runtime.ModelRespondedPayload](t, f.events(hosted)[2])
+	require.Equal(t, "anthropic", hostedResp.Provider)
+	require.Equal(t, "claude-opus-5", hostedResp.Model, "prefix stripped before the backend saw it")
+	require.Equal(t, int64(500), hostedResp.CostMicroUSD)
+	require.Equal(t, "from claude", f.state(hosted).FinalAnswer)
+
+	onBoxResp := decode[runtime.ModelRespondedPayload](t, f.events(onBox)[2])
+	require.Equal(t, "local", onBoxResp.Provider)
+	require.Equal(t, "fake-model", onBoxResp.Model, "worker default model, routed to the default backend")
+	require.Equal(t, "from local", f.state(onBox).FinalAnswer)
+
+	require.Equal(t, 1, claude.Calls())
+	require.Equal(t, 1, local.Calls())
+	require.Equal(t, "claude-opus-5", claude.Requests()[0].Model)
+	require.Equal(t, "fake-model", local.Requests()[0].Model)
+}
+
 func TestLoopModelFailureFailsTheRun(t *testing.T) {
 	p := fake.New()
 	p.OnComplete = func(context.Context, model.Request, int) error { return errors.New("connection refused") }

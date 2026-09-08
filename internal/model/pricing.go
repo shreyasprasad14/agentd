@@ -12,19 +12,32 @@ const MicroUSD = 1_000_000
 
 // Price is the per-token price for one model, in micro-USD per million tokens
 // (i.e. USD per million tokens, times 1e6). Anthropic-style pricing tables map
-// directly: $3/MTok input becomes InputPerMTok = 3_000_000.
+// directly: $3/MTok input becomes InputPerMTok = 3_000_000. The cache rates
+// price prompt tokens served from or written to a prompt cache; they are
+// zero for providers without one.
 type Price struct {
-	InputPerMTok  int64
-	OutputPerMTok int64
+	InputPerMTok      int64
+	OutputPerMTok     int64
+	CacheReadPerMTok  int64
+	CacheWritePerMTok int64
 }
+
+// IsZero reports whether every rate is zero, i.e. the model is free.
+func (p Price) IsZero() bool { return p == Price{} }
 
 // Cost prices usage against p. Integer arithmetic throughout; the division by
 // one million tokens rounds toward zero, so a single call can under-count by
 // at most one micro-USD.
 func (p Price) Cost(u Usage) int64 {
-	in := new(big.Int).Mul(big.NewInt(u.InputTokens), big.NewInt(p.InputPerMTok))
-	out := new(big.Int).Mul(big.NewInt(u.OutputTokens), big.NewInt(p.OutputPerMTok))
-	total := new(big.Int).Add(in, out)
+	total := new(big.Int)
+	for _, term := range [...]struct{ tokens, rate int64 }{
+		{u.InputTokens, p.InputPerMTok},
+		{u.OutputTokens, p.OutputPerMTok},
+		{u.CacheReadInputTokens, p.CacheReadPerMTok},
+		{u.CacheCreationInputTokens, p.CacheWritePerMTok},
+	} {
+		total.Add(total, new(big.Int).Mul(big.NewInt(term.tokens), big.NewInt(term.rate)))
+	}
 	total.Div(total, big.NewInt(1_000_000))
 	return total.Int64()
 }

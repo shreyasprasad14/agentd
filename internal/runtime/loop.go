@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -224,7 +225,7 @@ func (l *Loop) modelStep(ctx context.Context, run *store.Run, state *State) (*mo
 		started := time.Now()
 		resp, err = l.provider.Complete(ctx, req)
 		if err == nil {
-			log.Info("model responded", "provider", l.provider.Name(), "model", resp.Model,
+			log.Info("model responded", "provider", cmp.Or(resp.Provider, l.provider.Name()), "model", resp.Model,
 				"stop_reason", resp.StopReason, "input_tokens", resp.Usage.InputTokens,
 				"output_tokens", resp.Usage.OutputTokens, "duration_ms", time.Since(started).Milliseconds())
 			break
@@ -244,10 +245,16 @@ func (l *Loop) modelStep(ctx context.Context, run *store.Run, state *State) (*mo
 	if resp.Model == "" {
 		resp.Model = req.Model
 	}
+	// A composite provider (model.Router) names the backend that answered;
+	// a leaf provider leaves it blank and is named directly.
+	providerName := resp.Provider
+	if providerName == "" {
+		providerName = l.provider.Name()
+	}
 	cost := l.provider.CostMicroUSD(resp.Model, resp.Usage)
 	_, err = l.store.AppendModelResponse(ctx, run.ID, l.owner, EventModelResponded, ModelRespondedPayload{
 		Step:         step,
-		Provider:     l.provider.Name(),
+		Provider:     providerName,
 		Model:        resp.Model,
 		Content:      resp.Content,
 		StopReason:   resp.StopReason,

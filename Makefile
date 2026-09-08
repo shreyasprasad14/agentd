@@ -2,8 +2,9 @@ COMPOSE := docker compose -f deploy/docker-compose.yml
 DSN ?= postgres://agentd:agentd@localhost:5432/agentd?sslmode=disable
 MODEL ?= qwen2.5:7b
 MODEL_URL ?= http://localhost:11434/v1
+ANTHROPIC_MODEL ?= claude-opus-5
 
-.PHONY: build test test-short test-live up down logs migrate serve work demo crash-demo model-pull fmt vet
+.PHONY: build test test-short test-live test-live-anthropic up down logs migrate serve work demo demo-anthropic compare crash-demo model-pull fmt vet
 
 build:
 	go build ./...
@@ -19,6 +20,10 @@ test-short:
 ## test-live runs the opt-in test against a real local model (needs Ollama + the model pulled).
 test-live:
 	AGENTD_LIVE_MODEL=1 AGENTD_MODEL_URL=$(MODEL_URL) AGENTD_MODEL=$(MODEL) AGENTD_HTTP_DEBUG=1 go test ./internal/model/local -run TestLive -v -count=1
+
+## test-live-anthropic makes two real Messages API calls (needs ANTHROPIC_API_KEY; costs a fraction of a cent).
+test-live-anthropic:
+	AGENTD_LIVE_ANTHROPIC=1 AGENTD_ANTHROPIC_MODEL=$(ANTHROPIC_MODEL) AGENTD_HTTP_DEBUG=1 go test ./internal/model/anthropic -run TestLive -v -count=1
 
 fmt:
 	gofmt -l -w .
@@ -56,6 +61,19 @@ demo:
 		| jq -r .id); \
 	echo "run $$id"; \
 	curl -N "localhost:8080/v1/runs/$$id/stream"
+
+## demo-anthropic is `demo` against Claude with a real budget, so the spend counter moves.
+demo-anthropic:
+	@id=$$(curl -s -X POST localhost:8080/v1/runs \
+		-H 'content-type: application/json' \
+		-d '{"goal":"A motion was served on 2026-09-03. Use compute_deadline to find the date 30 weekdays later, skipping weekends, then call finish with the answer.","agent_config":{"model":"anthropic/$(ANTHROPIC_MODEL)"},"budget_usd":"0.50"}' \
+		| jq -r .id); \
+	echo "run $$id"; \
+	curl -N "localhost:8080/v1/runs/$$id/stream"
+
+## compare runs the same goal against the local model and Claude and diffs the trajectories.
+compare:
+	ANTHROPIC_MODEL="$(ANTHROPIC_MODEL)" ./scripts/compare-providers.sh
 
 ## crash-demo kills a worker mid-tool-call and shows a second worker resume the run.
 crash-demo:

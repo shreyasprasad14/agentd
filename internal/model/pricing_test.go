@@ -14,6 +14,11 @@ func TestPriceCost(t *testing.T) {
 		{"small call", Price{InputPerMTok: 3_000_000, OutputPerMTok: 15_000_000}, Usage{InputTokens: 1000, OutputTokens: 200}, 3000 + 3000},
 		{"rounds toward zero", Price{InputPerMTok: 1, OutputPerMTok: 0}, Usage{InputTokens: 999_999}, 0},
 		{"no overflow at large counts", Price{InputPerMTok: 15_000_000, OutputPerMTok: 75_000_000}, Usage{InputTokens: 10_000_000_000, OutputTokens: 1_000_000_000}, 150_000_000_000 + 75_000_000_000},
+		{"cache tokens priced at their own rates",
+			Price{InputPerMTok: 5_000_000, OutputPerMTok: 25_000_000, CacheReadPerMTok: 500_000, CacheWritePerMTok: 6_250_000},
+			Usage{InputTokens: 1000, OutputTokens: 100, CacheReadInputTokens: 10_000, CacheCreationInputTokens: 2000},
+			5000 + 2500 + 5000 + 12_500},
+		{"cache tokens are free when the price has no cache rate", Price{InputPerMTok: 1_000_000}, Usage{CacheReadInputTokens: 1_000_000}, 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

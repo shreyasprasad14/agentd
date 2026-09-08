@@ -54,6 +54,12 @@ services:
       AGENTD_DSN: postgres://agentd:agentd@postgres:5432/agentd?sslmode=disable
       AGENTD_MODEL_URL: ${AGENTD_MODEL_URL:-http://host.docker.internal:11434/v1}
       AGENTD_MODEL: ${AGENTD_MODEL:-qwen2.5:7b}
+      # Optional. Runs whose agent_config.model is "anthropic/..." or a bare
+      # "claude-*" name go to the Anthropic API; without a key those runs
+      # fail with an authentication error and local runs are unaffected.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      AGENTD_ANTHROPIC_PRICES: ${AGENTD_ANTHROPIC_PRICES:-}
+      AGENTD_ANTHROPIC_THINKING_DISPLAY: ${AGENTD_ANTHROPIC_THINKING_DISPLAY:-}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
     extra_hosts:
       - "host.docker.internal:host-gateway"

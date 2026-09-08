@@ -15,6 +15,7 @@ import (
 // Provider is a scripted model.
 type Provider struct {
 	mu        sync.Mutex
+	name      string
 	responses []*model.Response
 	requests  []model.Request
 	price     model.Price
@@ -36,8 +37,20 @@ func (p *Provider) WithPrice(price model.Price) *Provider {
 	return p
 }
 
+// WithName overrides the provider name (default "fake"), so a test can stand
+// several fakes behind a Router and tell them apart in the event log.
+func (p *Provider) WithName(name string) *Provider {
+	p.name = name
+	return p
+}
+
 // Name implements model.Provider.
-func (p *Provider) Name() string { return "fake" }
+func (p *Provider) Name() string {
+	if p.name != "" {
+		return p.name
+	}
+	return "fake"
+}
 
 // Complete implements model.Provider.
 func (p *Provider) Complete(ctx context.Context, req model.Request) (*model.Response, error) {

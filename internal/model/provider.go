@@ -27,6 +27,14 @@ const (
 	BlockText       = "text"
 	BlockToolUse    = "tool_use"
 	BlockToolResult = "tool_result"
+	// BlockThinking and BlockRedactedThinking are reasoning blocks some
+	// providers return alongside their answer. They are opaque to the loop:
+	// the reducer stores them in the assistant turn verbatim and the provider
+	// that produced them sends them back unchanged on the next call, which
+	// is what the Anthropic API requires when a thinking turn calls a tool.
+	// Other providers ignore them.
+	BlockThinking         = "thinking"
+	BlockRedactedThinking = "redacted_thinking"
 )
 
 // Stop reasons a provider may return.
@@ -51,6 +59,13 @@ type ContentBlock struct {
 	Content string `json:"content,omitempty"`
 	// IsError marks a tool_result that carries an error instead of a result.
 	IsError bool `json:"is_error,omitempty"`
+	// Thinking and Signature are set on thinking blocks. Thinking may be
+	// empty (the provider was asked to omit the text) while Signature is
+	// not; both must round-trip untouched.
+	Thinking  string `json:"thinking,omitempty"`
+	Signature string `json:"signature,omitempty"`
+	// Data is the opaque payload of a redacted_thinking block.
+	Data string `json:"data,omitempty"`
 }
 
 // Message is one turn of the conversation.
@@ -66,15 +81,25 @@ type ToolDef struct {
 	InputSchema json.RawMessage `json:"input_schema"`
 }
 
-// Usage is token accounting for one completion.
+// Usage is token accounting for one completion. InputTokens counts the
+// uncached prompt tokens, as the Anthropic API reports them; cached prompt
+// tokens are broken out because they are priced differently. Providers
+// without a cache leave the cache fields zero.
 type Usage struct {
-	InputTokens  int64 `json:"input_tokens"`
-	OutputTokens int64 `json:"output_tokens"`
+	InputTokens              int64 `json:"input_tokens"`
+	OutputTokens             int64 `json:"output_tokens"`
+	CacheReadInputTokens     int64 `json:"cache_read_input_tokens,omitempty"`
+	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens,omitempty"`
 }
 
 // Add sums usage.
 func (u Usage) Add(o Usage) Usage {
-	return Usage{InputTokens: u.InputTokens + o.InputTokens, OutputTokens: u.OutputTokens + o.OutputTokens}
+	return Usage{
+		InputTokens:              u.InputTokens + o.InputTokens,
+		OutputTokens:             u.OutputTokens + o.OutputTokens,
+		CacheReadInputTokens:     u.CacheReadInputTokens + o.CacheReadInputTokens,
+		CacheCreationInputTokens: u.CacheCreationInputTokens + o.CacheCreationInputTokens,
+	}
 }
 
 // Request is one completion call.
@@ -93,6 +118,11 @@ type Response struct {
 	Content    []ContentBlock `json:"content"`
 	StopReason string         `json:"stop_reason"`
 	Usage      Usage          `json:"usage"`
+	// Provider names the backend that actually answered. A composite
+	// provider such as Router sets it so the event log records the real
+	// backend rather than the composite's name; leaf providers may leave it
+	// empty, in which case the loop uses Provider.Name().
+	Provider string `json:"provider,omitempty"`
 }
 
 // ToolUses returns the tool_use blocks in order.
