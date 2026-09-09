@@ -20,15 +20,18 @@ import (
 	"github.com/shreyasprasad/agentd/internal/model/anthropic"
 	"github.com/shreyasprasad/agentd/internal/model/local"
 	"github.com/shreyasprasad/agentd/internal/runtime"
+	"github.com/shreyasprasad/agentd/internal/sandbox"
 	"github.com/shreyasprasad/agentd/internal/store"
 	"github.com/shreyasprasad/agentd/internal/tools"
 	"github.com/shreyasprasad/agentd/internal/tools/builtin"
+	"github.com/shreyasprasad/agentd/internal/tools/python"
 )
 
 const (
-	defaultDSN      = "postgres://agentd:agentd@localhost:5432/agentd?sslmode=disable"
-	defaultModelURL = "http://localhost:11434/v1"
-	defaultModel    = "qwen2.5:7b"
+	defaultDSN          = "postgres://agentd:agentd@localhost:5432/agentd?sslmode=disable"
+	defaultModelURL     = "http://localhost:11434/v1"
+	defaultModel        = "qwen2.5:7b"
+	defaultSandboxImage = "agentd/sandbox:python"
 )
 
 func main() {
@@ -74,10 +77,12 @@ commands:
 `)
 }
 
-// registry is the builtin tool set. serve and work must agree on it: the API
+// registry is the tool set. serve and work must agree on its names: the API
 // fills a run's default allowlist from it, the worker dispatches through it.
-func registry() *tools.Registry {
-	return tools.NewRegistry().MustRegister(builtin.Finish{}, builtin.ComputeDeadline{})
+// Only the worker has a sandbox executor; serve passes nil and gets a python
+// tool it can list and allowlist but not run.
+func registry(exec sandbox.Executor, limits sandbox.Limits) *tools.Registry {
+	return tools.NewRegistry().MustRegister(builtin.Finish{}, builtin.ComputeDeadline{}, python.New(exec, limits))
 }
 
 func serve(ctx context.Context, args []string) error {
@@ -97,7 +102,7 @@ func serve(ctx context.Context, args []string) error {
 	}
 	defer st.Close()
 
-	srv := api.NewServer(st, log, api.Options{PollInterval: *poll, Registry: registry()})
+	srv := api.NewServer(st, log, api.Options{PollInterval: *poll, Registry: registry(nil, sandbox.DefaultLimits())})
 	return srv.ListenAndServe(ctx, *addr)
 }
 
@@ -116,6 +121,9 @@ func work(ctx context.Context, args []string) error {
 		"extra Anthropic prices as model=input/output in USD per million tokens, comma separated (models without a price cannot be called)")
 	thinkingDisplay := fs.String("anthropic-thinking-display", os.Getenv("AGENTD_ANTHROPIC_THINKING_DISPLAY"),
 		"\"summarized\" records readable thinking summaries in the event log, \"omitted\" only signatures; empty takes the model default")
+	sandboxImage := fs.String("sandbox-image", envOr("AGENTD_SANDBOX_IMAGE", defaultSandboxImage), "container image for sandboxed tools (build with `make sandbox-build`)")
+	sandboxTimeout := fs.Duration("sandbox-timeout", envDurationOr("AGENTD_SANDBOX_TIMEOUT", sandbox.DefaultLimits().DefaultTimeout), "default wall-clock limit per sandboxed tool call")
+	sandboxMaxTimeout := fs.Duration("sandbox-max-timeout", envDurationOr("AGENTD_SANDBOX_MAX_TIMEOUT", sandbox.DefaultLimits().MaxTimeout), "the most a tool call may ask for via timeout_seconds")
 	skipMigrate := fs.Bool("skip-migrate", false, "do not apply migrations at startup")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -126,6 +134,11 @@ func work(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	exec, err := buildSandbox(ctx, *sandboxImage, sandbox.Limits{DefaultTimeout: *sandboxTimeout, MaxTimeout: *sandboxMaxTimeout}, log)
+	if err != nil {
+		return err
+	}
+	defer exec.Close()
 	st, err := open(ctx, *dsn, log, !*skipMigrate)
 	if err != nil {
 		return err
@@ -138,10 +151,36 @@ func work(ctx context.Context, args []string) error {
 		LeaseDuration:  *lease,
 		ReaperInterval: *reaper,
 		Provider:       provider,
-		Registry:       registry(),
+		Registry:       registry(exec, exec.Limits()),
 		DefaultModel:   *modelName,
 	})
 	return w.Run(ctx)
+}
+
+// buildSandbox wires the Docker executor. An unreachable daemon or a missing
+// image is a warning, not a fatal error: runs that never call a sandboxed
+// tool must keep working, and the ones that do get a clear tool_failed. When
+// the daemon is reachable, leftovers from a previous worker that died
+// mid-call are swept before any run is claimed.
+func buildSandbox(ctx context.Context, image string, limits sandbox.Limits, log *slog.Logger) (*sandbox.Docker, error) {
+	exec, err := sandbox.NewDocker(sandbox.DockerConfig{Image: image, Limits: limits, Log: log})
+	if err != nil {
+		return nil, err
+	}
+	pingCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if err := exec.Ping(pingCtx); err != nil {
+		log.Warn("sandbox unavailable; sandboxed tool calls will fail until it is", "error", err, "docker_host", exec.Host())
+		return exec, nil
+	}
+	n, err := exec.SweepOrphans(pingCtx, exec.OrphanAge())
+	if err != nil {
+		log.Warn("sandbox orphan sweep failed", "error", err)
+	}
+	l := exec.Limits()
+	log.Info("sandbox ready", "docker_host", exec.Host(), "image", image, "orphans_removed", n,
+		"memory_mb", l.MemoryBytes>>20, "cpus", l.CPUs, "pids", l.PidsLimit, "timeout", l.DefaultTimeout, "max_timeout", l.MaxTimeout)
+	return exec, nil
 }
 
 // buildProvider wires the local runtime and Anthropic behind one Router. The
@@ -236,6 +275,15 @@ func newLogger(mode string) *slog.Logger {
 func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return fallback
+}
+
+func envDurationOr(key string, fallback time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
 	}
 	return fallback
 }

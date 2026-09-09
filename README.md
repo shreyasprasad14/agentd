@@ -2,8 +2,7 @@
 
 A control plane for running LLM agents as durable, resumable, sandboxed, observable jobs.
 
-**Status: M1.5 (second model provider) complete.** Sandbox, retrieval, tracing, and evals are
-not implemented yet.
+**Status: M2 (sandbox) complete.** Retrieval, tracing, and evals are not implemented yet.
 
 ## M1 — Real loop + durability
 
@@ -66,6 +65,86 @@ anything else goes to the local runtime. So `agent_config.model` on a run is the
 provider override the spec asked for, and `model_responded.provider` records which backend
 actually answered. `make compare` submits one goal to both and diffs the trajectories.
 
+## M2 — Sandbox
+
+Every call to a sandboxed tool runs in a fresh container that is created, run, and destroyed
+for that one call. The executor in `internal/sandbox` drives the Docker Engine API directly (no
+`docker` CLI in the worker image) and applies the spec §7 flag set field for field: no network,
+512 MiB with swap disabled, one CPU, 128 pids, a read-only root filesystem with a 64 MiB tmpfs
+at `/tmp`, every capability dropped, `no-new-privileges`, uid 65534. Three things sit on top of
+the flags because a flag cannot do them:
+
+- **The worker owns the clock.** `ContainerWait` runs under a context deadline (30 s by default,
+  120 s at most, per call). On expiry the worker sends `SIGKILL`, records exit code 137 and
+  `timed_out: true`, and removes the container. If the worker itself is shutting down, the same
+  kill-and-remove happens and the tool is re-executed by the next worker.
+- **Output is capped as it streams.** stdout and stderr are demultiplexed off the attach stream
+  into fixed 16 KiB buffers that count and drop the rest, so a script printing gigabytes costs
+  the worker 32 KiB and the model sees `stdout_truncated: true`. The daemon's log driver is off
+  for these containers, so the flood never reaches the host disk either.
+- **Leftovers are swept.** Containers carry `agentd.run_id` and `agentd.seq` labels. A worker
+  that is `kill -9`'d mid-call leaves a container with no supervisor; every worker removes
+  labelled containers older than the maximum timeout at boot, and leaves younger ones (possibly a
+  live sibling's) alone.
+
+Inputs reach the container through an anonymous volume at `/work/in`, filled with
+`CopyToContainer` before start and deleted with the container. The daemon refuses copies into a
+read-only rootfs, and a bind mount would need a host path the worker cannot supply once it runs
+in compose. The volume inherits the image's root-owned `0555` directory, so the sandboxed
+process gets `EACCES` if it tries to rewrite its own script.
+
+The `run_python` tool is the first sandboxed tool: `{code, stdin?, files?, timeout_seconds?}`
+→ `{stdout, stderr, exit_code, timed_out, oom_killed, stdout_truncated, stderr_truncated,
+duration_ms}`. A script that exits nonzero, is OOM-killed, or times out is a *successful* tool
+call whose result says so: the model needs the traceback to fix the code, and a step limit
+already bounds how many times it may try. Only a failure of the sandbox itself (daemon
+unreachable, image missing) is a `tool_failed`. The exit code is recorded on the
+`tool_succeeded` event, so evals can read it from the log. (The spec calls the tool `python`.
+Ollama 0.33 reserves that name for its own builtin tool and silently drops any tool call to it,
+whichever model is serving; renaming it was cheaper than arguing with the parser.)
+
+Building this surfaced one loop fix: a model response with no text and no tool call, which is
+exactly what an OpenAI-compatible server returns after dropping a tool call it could not parse,
+used to finish the run as `succeeded` with an empty answer. It is now retried like a transport
+error and fails the run with a clear message if it persists.
+
+The safety tests in `internal/sandbox/safety_test.go` are the spec §12 `SAFETY` category run
+against the real daemon, one hostile script per row:
+
+| Probe | Observed |
+|---|---|
+| TCP to 1.1.1.1:80, DNS lookup, interface scan | `ENETUNREACH`, resolution failure, only `lo` up and no routes |
+| Fork bomb | `fork()` refused with `EAGAIN` at the pids cap; container exits in ~200 ms, not at the deadline |
+| Writes to `/`, `/usr`, `/etc`, `/work/in`; 100 MiB into `/tmp` | `EROFS`, `EROFS`, `EROFS`, `EACCES`; `ENOSPC` after 64 MiB |
+| uid, capability sets, `NoNewPrivs`, `su root` | 65534; effective, permitted, and bounding sets all zero; 1; authentication failure |
+| Allocate 2 GiB against a 512 MiB cap | OOM-killed, exit 137, `oom_killed: true`, nothing printed |
+| `sleep 60` with a 2 s limit | killed at 2 s, exit 137, partial stdout kept, container gone |
+
+`make test-sandbox` runs them on their own. The threat model, what each control stops, and what
+the sandbox does *not* stop are in [docs/SECURITY.md](docs/SECURITY.md).
+
+### Why Docker, and what a real deployment would use
+
+Namespaces and cgroups are a policy boundary, not a hardware one: the sandboxed process shares
+the host kernel, and a kernel exploit escapes everything above. The four realistic options trade
+that gap against cost. **Docker as configured here** costs nothing extra, starts in ~100 ms, runs
+any Linux payload, and relies on the default seccomp profile plus the flags above to keep the
+kernel surface small. **gVisor** (`runsc`) interposes a user-space kernel, so most syscalls never
+reach the host; it costs syscall-heavy workloads real throughput, but a script doing date
+arithmetic and text processing will not notice, and it is a one-field change
+(`HostConfig.Runtime`) with the same image and flags. **Firecracker** gives a true VM boundary
+per call with cold starts in the low hundreds of milliseconds, at the cost of running a VMM
+fleet and losing the Docker image and API conveniences. **WASM** has the strongest isolation
+model of the four but the narrowest runtime; CPython under WASI is real but its standard library
+coverage is not yet something to build a product on.
+
+For a legal-tech deployment handling privileged client material, the choice is gVisor as the
+default runtime, on a dedicated or rootless daemon so the socket the worker holds is not the
+host's. The workload does not pay gVisor's tax, the operational model is unchanged, and it
+closes the one gap that the flag set cannot. Firecracker becomes the answer when tenants share
+hosts and the isolation boundary has to survive a kernel bug by construction rather than by
+interposition. The path is written down in order in `docs/SECURITY.md`.
+
 ## Quickstart
 
 You need Docker, Go 1.25, and [Ollama](https://ollama.com) on the host. For Claude, export
@@ -75,7 +154,7 @@ runs that target Claude fail with an authentication error.
 ```bash
 brew install ollama && ollama serve &   # or the desktop app
 make model-pull                         # ollama pull qwen2.5:7b
-make up                                 # Postgres 16 (pgvector), Jaeger, api, worker
+make up                                 # builds agentd/sandbox:python, then Postgres 16 (pgvector), Jaeger, api, worker
 
 curl -X POST localhost:8080/v1/runs \
   -H 'content-type: application/json' \
@@ -109,6 +188,25 @@ curl -X POST localhost:8080/v1/runs \
 `make demo-anthropic` does that; `make compare` runs one goal against both providers and
 prints the two trajectories side by side.
 
+The same question with the date math done in the sandbox instead of the builtin: grant only
+`run_python` and `finish`, and the model has to write the script.
+
+```bash
+curl -X POST localhost:8080/v1/runs \
+  -H 'content-type: application/json' \
+  -d '{"goal":"A motion was served on 2026-09-03. Write and run a Python script with the run_python tool that computes the date 30 weekdays later (skip Saturdays and Sundays) and prints it as YYYY-MM-DD. Then call finish with that date.","agent_config":{"tools":["run_python","finish"]}}'
+# ...
+# id: 4 / event: tool_requested       run_python {"code":"from datetime import date, timedelta\n..."}
+# id: 5 / event: tool_succeeded       {"stdout":"2026-10-15\n","stderr":"","exit_code":0,"timed_out":false,...}
+```
+
+`make demo-python` does that. Watch the worker log for `sandbox run finished` lines with the
+container id, exit code, and duration, or `docker ps` during a call to see the container with
+its `agentd.run_id` label and no network. With `qwen2.5:7b` the recorded trajectory was: first
+script imports `dateutil`, the stdlib-only sandbox returns exit 1 and the `ModuleNotFoundError`
+traceback as data, the model rewrites it with `datetime` alone, gets `2026-10-15`, and calls
+`finish`. That is the failing-script-as-result decision (ADR-14) doing its job.
+
 ### The crash demo
 
 ```bash
@@ -136,11 +234,19 @@ make work        # worker, in a second shell; talks to Ollama on localhost:11434
 
 Both `serve` and `work` apply migrations at startup (advisory-locked, so racing them is safe)
 and retry the initial connection for 30s. Worker flags: `-model-url`, `-model`, `-lease`,
-`-reaper-interval`, `-owner`, `-anthropic-prices`, `-anthropic-thinking-display`. Env
-equivalents: `AGENTD_MODEL_URL`, `AGENTD_MODEL`, `AGENTD_DSN`, `AGENTD_WORKER_OWNER`,
-`AGENTD_ANTHROPIC_PRICES`, `AGENTD_ANTHROPIC_THINKING_DISPLAY`. Credentials for Claude come
-from `ANTHROPIC_API_KEY` (or a profile from `ant auth login`); `-model claude-opus-5` makes
-Claude the default for runs that name no model.
+`-reaper-interval`, `-owner`, `-anthropic-prices`, `-anthropic-thinking-display`,
+`-sandbox-image`, `-sandbox-timeout`, `-sandbox-max-timeout`. Env equivalents: `AGENTD_MODEL_URL`,
+`AGENTD_MODEL`, `AGENTD_DSN`, `AGENTD_WORKER_OWNER`, `AGENTD_ANTHROPIC_PRICES`,
+`AGENTD_ANTHROPIC_THINKING_DISPLAY`, `AGENTD_SANDBOX_IMAGE`, `AGENTD_SANDBOX_TIMEOUT`,
+`AGENTD_SANDBOX_MAX_TIMEOUT`. Credentials for Claude come from `ANTHROPIC_API_KEY` (or a
+profile from `ant auth login`); `-model claude-opus-5` makes Claude the default for runs that
+name no model.
+
+The worker finds Docker the way the CLI does: `DOCKER_HOST`, then the current `docker context`
+(so Docker Desktop's per-user socket on macOS works without configuration), then
+`/var/run/docker.sock`. In compose the socket is mounted into the worker container. If the
+daemon or the sandbox image is missing at boot the worker logs a warning and keeps running;
+`run_python` calls then fail as retryable `tool_failed` events until it is fixed.
 
 ## Endpoints
 
@@ -157,8 +263,10 @@ Claude the default for runs that name no model.
 
 `agent_config` fields: `model` (picks the provider too: `anthropic/<id>`, `local/<name>`, a
 bare `claude-*` id, or anything else for the local runtime), `system_prompt`, `tools`
-(allowlist; defaults to every registered tool and is fixed at submission), `max_tokens`,
-`tool_delay_ms` (demo only). Unknown fields and unknown tool names are rejected with 400.
+(allowlist; defaults to every registered tool, `run_python` included, and is fixed at
+submission), `max_tokens`, `tool_delay_ms` (demo only). Unknown fields and unknown tool names
+are rejected with 400. Registered tools: `compute_deadline` and `finish` (builtin), `run_python`
+(sandboxed).
 
 ## Event log
 
@@ -181,8 +289,9 @@ worse than one that refuses.
 ## Tests
 
 ```bash
-make test                 # unit + testcontainers integration tests; requires Docker
+make test                 # unit + testcontainers integration tests + sandbox tests; requires Docker
 make test-short           # unit tests only
+make test-sandbox         # the Docker executor tests and the SAFETY probes, verbose
 make test-live            # one real call to Ollama; requires the model pulled
 make test-live-anthropic  # two real calls to Claude (a tool call, then the tool result
                           # with the thinking turn echoed back); needs ANTHROPIC_API_KEY
@@ -193,6 +302,11 @@ wire body is asserted exactly: thinking blocks echoed in order, tool schemas pas
 every keyword, cache tokens priced. The loop's router test runs two fakes behind a `Router` and
 checks each run is priced and labelled by the backend that answered it.
 
+The sandbox tests build `agentd/sandbox:python` with the `docker` CLI once per test binary and
+run real containers against the local daemon; the `run_python` tool and the loop are tested with
+a scripted executor so the tool's behaviour (exit codes as data, timeout annotations, label
+propagation, schema bounds) is covered without Docker.
+
 ## Layout
 
 ```
@@ -200,14 +314,16 @@ cmd/agentd/            # serve | work | migrate
 internal/api/          # handlers, SSE tail, config normalisation
 internal/runtime/      # event payloads, Reduce, the loop, worker (claim/heartbeat/reaper)
 internal/model/        # Provider interface, pricing, Router; local/ (OpenAI-compatible), anthropic/ (Claude), fake/ (tests)
-internal/tools/        # Tool interface, registry + schema validation; builtin/ (finish, compute_deadline)
+internal/tools/        # Tool interface, registry + schema validation; builtin/ (finish, compute_deadline); python/ (sandboxed)
+internal/sandbox/      # Executor interface, Docker executor, limits, output capping, safety tests
 internal/store/        # Postgres access, fenced writes, ledger, embedded migrations
 internal/testutil/     # shared testcontainers Postgres fixture
 scripts/crash-demo.sh  # the kill -9 demo
 scripts/compare-providers.sh  # one goal, both providers, trajectories side by side
 docs/DECISIONS.md      # ADRs
+docs/SECURITY.md       # threat model
 docs/plans/            # per-milestone plans
-deploy/                # docker-compose.yml, Dockerfile
+deploy/                # docker-compose.yml, Dockerfile, sandbox/Dockerfile
 ```
 
 ## Notes on choices
@@ -216,7 +332,9 @@ See [docs/DECISIONS.md](docs/DECISIONS.md) for the ADRs: Postgres as the queue, 
 blocks as the canonical message format, OpenAI-compatible local provider, at-least-once model
 calls vs exactly-once tool calls, lease fencing, micro-USD cost accounting, the reaper,
 submission-time allowlists, reduce-every-iteration, provider routing by model name, thinking
-blocks as opaque log content, and refusing to call an unpriced model.
+blocks as opaque log content, refusing to call an unpriced model, the Engine API over the
+docker CLI, failing scripts as results rather than tool failures, inputs through an anonymous
+volume, and the boot-time orphan sweep.
 
 Earlier notes from M0 still hold: hand-written pgx rather than sqlc while the schema moves;
 SSE polls the log at 200ms rather than `LISTEN/NOTIFY`; the terminal status and

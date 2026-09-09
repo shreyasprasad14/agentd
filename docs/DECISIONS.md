@@ -165,3 +165,73 @@ answer. As an error it fails the run with the policy category in `run_finished.e
 **Cost.** The loop retries every provider error three times, so a refusal or an unknown model
 costs a few seconds and, for a refusal, up to three calls before the run fails. A typed
 non-retryable error is a small M4 follow-up once the loop grows a metric for it.
+
+## ADR-13: The sandbox drives the Engine API, not the `docker` CLI
+
+**Decision.** `internal/sandbox.Docker` creates, attaches to, starts, waits on, kills, and
+removes containers through the Docker Engine API (the `moby/client` module already in the
+dependency graph via testcontainers). It never shells out to `docker`.
+
+**Why.** The worker image is distroless: there is no shell and no CLI, and adding one for the
+sake of `docker run` would add tens of megabytes and a second parser between the worker and
+the daemon. The API gives structured errors, the attach stream (so output is capped in memory as
+it arrives rather than after a `docker logs`), the exact exit code from `wait`, and `OOMKilled`
+from inspect. It also makes location irrelevant: the worker on a laptop finds the daemon through
+the CLI's current context, and the worker in compose finds it through the mounted socket, with
+the same code path. Every §7 flag maps one-to-one onto a `HostConfig` field; the mapping table is
+in `docs/plans/m2.md`.
+
+**Cost.** The daemon socket is root-equivalent on the host. The worker is trusted infrastructure
+and the payload never sees the socket, but a compromised worker process would own the machine.
+`docs/SECURITY.md` says so and names the mitigations (rootless daemon, a socket proxy that
+allows only the container endpoints, or a dedicated daemon for sandboxes).
+
+**Revisit when.** A stronger boundary is needed: gVisor is `HostConfig.Runtime = "runsc"` with
+the same image and flags, which is the main reason to prefer the API over hand-built `docker
+run` strings.
+
+## ADR-14: A failing script is a result, not a tool failure
+
+**Decision.** `sandbox.Executor.Run` returns an error only when the sandbox itself failed
+(daemon unreachable, image missing, create or start refused). A nonzero exit, a timeout, or an
+OOM kill is a successful `Run` whose `Output` says what happened, and the `run_python` tool passes
+that through as `{stdout, stderr, exit_code, timed_out, oom_killed, ...}`. The loop records it as
+`tool_succeeded` with the exit code; only sandbox failures become `tool_failed{retryable:true}`.
+
+**Why.** The model needs the traceback to fix the script, and it needs to know the difference
+between "your code is wrong" (data, try again) and "the platform is broken" (an error the runtime
+owns). Folding both into `is_error` would either hide the traceback or teach the model to retry
+an outage. The step limit still bounds how many times a model can fail at the same script.
+
+**Boundary.** `exit_code` in `tool_succeeded` is the sandbox's; the M5 SAFETY and SMOKE evals
+read it from the log without re-running anything.
+
+## ADR-15: Inputs enter the sandbox through an anonymous volume
+
+**Decision.** The script and any input files are packed as a root-owned, mode 0444 tar and
+copied with `CopyToContainer` into an anonymous volume mounted at `/work/in` on the
+created-but-not-started container. Neither a bind mount nor a copy into the rootfs is used.
+
+**Why.** The daemon refuses `docker cp` into a read-only rootfs (`container rootfs is marked
+read-only`), and dropping `--read-only` to allow it would be the wrong trade. A bind mount needs a
+path that exists on the Docker *host*, which the worker cannot provide once it runs in compose and
+talks to the daemon over the socket. An anonymous volume is created by the daemon wherever the
+daemon is, accepts the copy, inherits the image's root-owned `0555` directory so uid 65534 gets
+`EACCES` on write (the safety test asserts this), and is deleted with the container
+(`RemoveVolumes`). The read-only property comes from ownership rather than a mount flag, which is
+weaker in principle and equivalent for an unprivileged process with no capabilities.
+
+**Cost.** One volume create and remove per call, a few milliseconds on Docker Desktop.
+
+## ADR-16: Every worker sweeps orphaned sandbox containers at boot, by age
+
+**Decision.** Each sandbox container carries `agentd.sandbox`, `agentd.run_id`, `agentd.seq`,
+and `agentd.tool` labels. When a worker starts it force-removes any `agentd.sandbox` container
+older than the maximum sandbox timeout plus thirty seconds, and leaves younger ones alone.
+
+**Why.** The wall-clock timeout lives in the worker, so a worker that is `kill -9`'d mid-call
+leaves a container with no supervisor; the next worker re-executes the tool (ADR-4) and the
+orphan keeps its CPU and memory until something notices. Age is the safe test: a container older
+than the longest any call may run cannot belong to a live worker, and a younger one might belong
+to a healthy sibling. Sweeping on boot rather than on a timer keeps it out of the hot path and
+covers the case that matters (a restart after a crash) without a second reaper.

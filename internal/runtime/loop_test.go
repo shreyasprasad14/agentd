@@ -245,6 +245,39 @@ func TestLoopRoutesByModel(t *testing.T) {
 	require.Equal(t, "fake-model", local.Requests()[0].Model)
 }
 
+// TestLoopEmptyModelResponseIsRetried: a response with no text and no tool
+// call is what an OpenAI-compatible server returns when it drops a tool call
+// it could not parse. It must be retried like a transport error, not
+// recorded as a successful run with an empty answer.
+func TestLoopEmptyModelResponseIsRetried(t *testing.T) {
+	empty := &model.Response{StopReason: model.StopEndTurn, Usage: model.Usage{InputTokens: 500, OutputTokens: 180}}
+	f := newFixture(t, fake.New(empty, finishCall("t1", "recovered")))
+	stop := f.startWorker("w1", 10*time.Second)
+	defer stop()
+
+	id := f.submit("flaky model", runOpts{})
+	run := f.waitTerminal(id)
+	require.Equal(t, runtime.StatusSucceeded, run.Status)
+	require.Equal(t, "recovered", f.state(id).FinalAnswer)
+	require.Equal(t, 2, f.provider.Calls())
+	// The retry happens inside one model step: a single model_requested.
+	require.Equal(t, []string{
+		runtime.EventRunStarted, runtime.EventModelRequested, runtime.EventModelResponded,
+		runtime.EventToolRequested, runtime.EventToolSucceeded, runtime.EventRunFinished,
+	}, eventTypes(f.events(id)))
+
+	// Persistently empty: the run fails and says why, instead of succeeding
+	// with nothing.
+	f2 := newFixture(t, fake.New(empty, empty, empty))
+	stop2 := f2.startWorker("w2", 10*time.Second)
+	defer stop2()
+	id2 := f2.submit("always empty", runOpts{})
+	run2 := f2.waitTerminal(id2)
+	require.Equal(t, runtime.StatusFailed, run2.Status)
+	require.Contains(t, f2.state(id2).Error, "empty response")
+	require.Equal(t, 3, f2.provider.Calls())
+}
+
 func TestLoopModelFailureFailsTheRun(t *testing.T) {
 	p := fake.New()
 	p.OnComplete = func(context.Context, model.Request, int) error { return errors.New("connection refused") }

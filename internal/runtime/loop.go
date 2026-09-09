@@ -224,6 +224,16 @@ func (l *Loop) modelStep(ctx context.Context, run *store.Run, state *State) (*mo
 	for attempt := 1; ; attempt++ {
 		started := time.Now()
 		resp, err = l.provider.Complete(ctx, req)
+		if err == nil && len(resp.Content) == 0 {
+			// No text and no tool call is not an answer, it is a malformed
+			// turn: a local server that failed to parse the model's tool
+			// call returns exactly this, tokens spent and nothing to show.
+			// Treat it like a dropped connection rather than finishing the
+			// run "succeeded" with an empty answer. The spent tokens are
+			// logged but not accounted, since there is no event to hang
+			// them on without putting an empty assistant turn in the log.
+			err = fmt.Errorf("model returned an empty response (stop_reason=%q, output_tokens=%d)", resp.StopReason, resp.Usage.OutputTokens)
+		}
 		if err == nil {
 			log.Info("model responded", "provider", cmp.Or(resp.Provider, l.provider.Name()), "model", resp.Model,
 				"stop_reason", resp.StopReason, "input_tokens", resp.Usage.InputTokens,

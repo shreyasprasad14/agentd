@@ -45,6 +45,12 @@ services:
   # The model runs on the host, not in compose: Docker Desktop on macOS has
   # no GPU passthrough, so Ollama in a container would be CPU-only. The
   # worker reaches the host's Ollama through host.docker.internal.
+  #
+  # Sandboxed tool calls run as sibling containers on the host daemon
+  # ("Docker outside of Docker"): the worker talks to the daemon through the
+  # mounted socket, and the sandbox image must exist on that daemon
+  # (`make sandbox-build`, which `make up` runs first). The socket grants
+  # root-equivalent control of the host; see docs/SECURITY.md.
   worker:
     build:
       context: ..
@@ -54,6 +60,9 @@ services:
       AGENTD_DSN: postgres://agentd:agentd@postgres:5432/agentd?sslmode=disable
       AGENTD_MODEL_URL: ${AGENTD_MODEL_URL:-http://host.docker.internal:11434/v1}
       AGENTD_MODEL: ${AGENTD_MODEL:-qwen2.5:7b}
+      AGENTD_SANDBOX_IMAGE: ${AGENTD_SANDBOX_IMAGE:-agentd/sandbox:python}
+      AGENTD_SANDBOX_TIMEOUT: ${AGENTD_SANDBOX_TIMEOUT:-30s}
+      AGENTD_SANDBOX_MAX_TIMEOUT: ${AGENTD_SANDBOX_MAX_TIMEOUT:-120s}
       # Optional. Runs whose agent_config.model is "anthropic/..." or a bare
       # "claude-*" name go to the Anthropic API; without a key those runs
       # fail with an authentication error and local runs are unaffected.
@@ -61,6 +70,8 @@ services:
       AGENTD_ANTHROPIC_PRICES: ${AGENTD_ANTHROPIC_PRICES:-}
       AGENTD_ANTHROPIC_THINKING_DISPLAY: ${AGENTD_ANTHROPIC_THINKING_DISPLAY:-}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
