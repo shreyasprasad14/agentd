@@ -1,0 +1,48 @@
+{
+  "cases": 13,
+  "modes": [
+    {
+      "mode": "vector",
+      "recall_at_8": 1,
+      "recall_at_20": 1,
+      "recall_at_50": 1,
+      "mrr": 1,
+      "elapsed_ns": 302926958
+    },
+    {
+      "mode": "bm25",
+      "recall_at_8": 1,
+      "recall_at_20": 1,
+      "recall_at_50": 1,
+      "mrr": 0.9230769230769231,
+      "elapsed_ns": 15151125
+    },
+    {
+      "mode": "hybrid",
+      "recall_at_8": 1,
+      "recall_at_20": 1,
+      "recall_at_50": 1,
+      "mrr": 1,
+      "elapsed_ns": 268440541
+    },
+    {
+      "mode": "hybrid+rerank",
+      "recall_at_8": 1,
+      "recall_at_20": 1,
+      "recall_at_50": 1,
+      "mrr": 1,
+      "elapsed_ns": 370083800583
+    }
+  ],
+  "corpus": {
+    "documents": 12,
+    "chunks": 48,
+    "embedding_models": [
+      "mxbai-embed-large"
+    ]
+  },
+  "embedding_model": "mxbai-embed-large",
+  "rerank_model": "qwen2.5:7b",
+  "labels": "evals/retrieval/labels.yaml",
+  "generated_at": "2026-09-10T19:40:19.045591Z"
+}

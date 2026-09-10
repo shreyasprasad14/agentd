@@ -1,0 +1,54 @@
+# Hand-labeled retrieval queries. This checked-in set targets the fixture
+# corpus (fixture.jsonl) so `make eval-retrieval` works out of the box; after
+# ingesting a real corpus, relabel with real queries using
+#   agentd eval retrieval -label "<query>"
+# which prints the top 20 hybrid hits to mark up. To avoid biasing recall
+# upward, write about a third of the queries from documents picked off the
+# corpus listing first, not from search results.
+#
+# Labels are document-level (any chunk of the opinion counts). Chunk-level
+# labels add `ordinals: [..]`.
+thresholds:
+  hybrid: {recall_at_8: 0.70}
+  hybrid_rerank: {recall_at_8: 0.70}
+cases:
+  - query: "warnings police must give before questioning a suspect in custody"
+    relevant:
+      - {source_id: "clop-0001"}
+  - query: "does the government need a warrant for historical cell phone location data"
+    relevant:
+      - {source_id: "clop-0002"}
+  - query: "stop and frisk on reasonable suspicion without probable cause"
+    relevant:
+      - {source_id: "clop-0003"}
+  - query: "prosecution withheld exculpatory evidence from the defense"
+    relevant:
+      - {source_id: "clop-0004"}
+  - query: "qualified immunity for officials when the law was not clearly established"
+    relevant:
+      - {source_id: "clop-0005"}
+  - query: "judicial deference to an agency's interpretation of an ambiguous statute"
+    relevant:
+      - {source_id: "clop-0006"}
+  - query: "can a school punish students for wearing armbands in protest"
+    relevant:
+      - {source_id: "clop-0007"}
+  - query: "taking private property by eminent domain for economic development"
+    relevant:
+      - {source_id: "clop-0008"}
+  - query: "right of an indigent defendant to a court appointed lawyer"
+    relevant:
+      - {source_id: "clop-0009"}
+  - query: "actual malice standard for defamation of public officials"
+    relevant:
+      - {source_id: "clop-0010"}
+  - query: "is wiretapping a phone booth a search under the Fourth Amendment"
+    relevant:
+      - {source_id: "clop-0011"}
+  - query: "striking jurors because of their race with peremptory challenges"
+    relevant:
+      - {source_id: "clop-0012"}
+  - query: "expectation of privacy in movements tracked over time"
+    relevant:
+      - {source_id: "clop-0002"}
+      - {source_id: "clop-0011"}

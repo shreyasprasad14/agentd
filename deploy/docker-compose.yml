@@ -63,6 +63,13 @@ services:
       AGENTD_SANDBOX_IMAGE: ${AGENTD_SANDBOX_IMAGE:-agentd/sandbox:python}
       AGENTD_SANDBOX_TIMEOUT: ${AGENTD_SANDBOX_TIMEOUT:-30s}
       AGENTD_SANDBOX_MAX_TIMEOUT: ${AGENTD_SANDBOX_MAX_TIMEOUT:-120s}
+      # Retrieval (M3). The embedder defaults to the model URL: Ollama serves
+      # chat and embeddings from one port. The reranker runs on the local
+      # model; AGENTD_RERANK=off disables it.
+      AGENTD_EMBED_URL: ${AGENTD_EMBED_URL:-}
+      AGENTD_EMBED_MODEL: ${AGENTD_EMBED_MODEL:-mxbai-embed-large}
+      AGENTD_RERANK: ${AGENTD_RERANK:-on}
+      AGENTD_RERANK_MODEL: ${AGENTD_RERANK_MODEL:-}
       # Optional. Runs whose agent_config.model is "anthropic/..." or a bare
       # "claude-*" name go to the Anthropic API; without a key those runs
       # fail with an authentication error and local runs are unaffected.

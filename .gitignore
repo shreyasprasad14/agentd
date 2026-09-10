@@ -20,3 +20,7 @@
 
 # Build artifacts
 dist/
+
+# Fetched corpora. evals/retrieval/fixture.jsonl and labels.yaml are checked
+# in; multi-hundred-megabyte opinion pulls are not.
+data/

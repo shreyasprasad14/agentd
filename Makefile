@@ -2,10 +2,14 @@ COMPOSE := docker compose -f deploy/docker-compose.yml
 DSN ?= postgres://agentd:agentd@localhost:5432/agentd?sslmode=disable
 MODEL ?= qwen2.5:7b
 MODEL_URL ?= http://localhost:11434/v1
+EMBED_MODEL ?= mxbai-embed-large
 ANTHROPIC_MODEL ?= claude-opus-5
 SANDBOX_IMAGE ?= agentd/sandbox:python
+COURT ?= scotus
+LIMIT ?= 2500
+CORPUS ?= data/corpus/$(COURT).jsonl
 
-.PHONY: build test test-short test-sandbox test-live test-live-anthropic up down logs migrate serve work demo demo-anthropic demo-python compare crash-demo model-pull sandbox-build fmt vet
+.PHONY: build test test-short test-sandbox test-retrieval test-live test-live-anthropic up down logs migrate serve work demo demo-anthropic demo-python demo-legal compare crash-demo model-pull sandbox-build fetch-corpus ingest ingest-fixture eval-retrieval fmt vet
 
 build:
 	go build ./...
@@ -60,9 +64,33 @@ serve:
 work:
 	go run ./cmd/agentd work -dsn "$(DSN)" -model-url "$(MODEL_URL)" -model "$(MODEL)" -sandbox-image "$(SANDBOX_IMAGE)"
 
-## model-pull fetches the default local model into Ollama.
+## model-pull fetches the default local model and the embedding model into Ollama.
 model-pull:
 	ollama pull $(MODEL)
+	ollama pull $(EMBED_MODEL)
+
+## test-retrieval runs only the pgvector-backed retrieval integration tests (needs Docker, no model).
+test-retrieval:
+	go test ./internal/retrieval/... ./internal/store -run 'TestIngest|TestSearch|TestGetDocument' -count=1 -timeout 300s
+
+## fetch-corpus pulls opinions from CourtListener into $(CORPUS). Set
+## COURTLISTENER_TOKEN for authenticated rate limits; re-running resumes.
+fetch-corpus:
+	go run ./cmd/agentd fetch -court $(COURT) -filed-after 2010-01-01 -limit $(LIMIT) -out $(CORPUS)
+
+## ingest chunks, embeds (via Ollama), and upserts the fetched corpus.
+ingest:
+	go run ./cmd/agentd ingest -dsn "$(DSN)" -file $(CORPUS) -model-url "$(MODEL_URL)" -embed-model $(EMBED_MODEL)
+
+## ingest-fixture loads the 12-opinion test fixture, enough for demo-legal
+## and the smoke eval without a CourtListener pull.
+ingest-fixture:
+	go run ./cmd/agentd ingest -dsn "$(DSN)" -file evals/retrieval/fixture.jsonl -model-url "$(MODEL_URL)" -embed-model $(EMBED_MODEL)
+
+## eval-retrieval prints recall@k and MRR per mode over the labeled query set
+## and exits nonzero below the thresholds in labels.yaml.
+eval-retrieval:
+	go run ./cmd/agentd eval retrieval -dsn "$(DSN)" -model-url "$(MODEL_URL)" -embed-model $(EMBED_MODEL)
 
 ## demo submits a run against a locally running API and tails its SSE stream.
 demo:
@@ -87,6 +115,16 @@ demo-python:
 	@id=$$(curl -s -X POST localhost:8080/v1/runs \
 		-H 'content-type: application/json' \
 		-d '{"goal":"A motion was served on 2026-09-03. Write and run a Python script with the run_python tool that computes the date 30 weekdays later (skip Saturdays and Sundays) and prints it as YYYY-MM-DD. Then call finish with that date.","agent_config":{"tools":["run_python","finish"]}}' \
+		| jq -r .id); \
+	echo "run $$id"; \
+	curl -N "localhost:8080/v1/runs/$$id/stream"
+
+## demo-legal asks a research question against the ingested corpus; the model
+## must search, read, and cite. Run `make ingest` (or `make ingest-fixture`) first.
+demo-legal:
+	@id=$$(curl -s -X POST localhost:8080/v1/runs \
+		-H 'content-type: application/json' \
+		-d '{"goal":"What did the Court hold about warrants for historical cell phone location records? Use search_corpus to find the controlling opinion, fetch_document to read it, then call finish with a short answer citing the opinion by source_id and paragraph ordinal.","agent_config":{"tools":["search_corpus","fetch_document","finish"]}}' \
 		| jq -r .id); \
 	echo "run $$id"; \
 	curl -N "localhost:8080/v1/runs/$$id/stream"

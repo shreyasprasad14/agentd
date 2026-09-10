@@ -19,11 +19,13 @@ import (
 	"github.com/shreyasprasad/agentd/internal/model"
 	"github.com/shreyasprasad/agentd/internal/model/anthropic"
 	"github.com/shreyasprasad/agentd/internal/model/local"
+	"github.com/shreyasprasad/agentd/internal/retrieval"
 	"github.com/shreyasprasad/agentd/internal/runtime"
 	"github.com/shreyasprasad/agentd/internal/sandbox"
 	"github.com/shreyasprasad/agentd/internal/store"
 	"github.com/shreyasprasad/agentd/internal/tools"
 	"github.com/shreyasprasad/agentd/internal/tools/builtin"
+	"github.com/shreyasprasad/agentd/internal/tools/corpus"
 	"github.com/shreyasprasad/agentd/internal/tools/python"
 )
 
@@ -57,6 +59,12 @@ func run() error {
 		return work(ctx, os.Args[2:])
 	case "migrate":
 		return migrate(ctx, os.Args[2:])
+	case "fetch":
+		return fetchCmd(ctx, os.Args[2:])
+	case "ingest":
+		return ingestCmd(ctx, os.Args[2:])
+	case "eval":
+		return evalCmd(ctx, os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 		return nil
@@ -73,16 +81,20 @@ commands:
   serve     run the HTTP API (POST /v1/runs, GET /v1/runs/:id, SSE stream)
   work      run a queue worker that executes claimed runs
   migrate   apply database migrations and exit
+  fetch     pull court opinions from CourtListener into a JSONL corpus file
+  ingest    chunk, embed, and upsert a fetched corpus into Postgres
+  eval      run an eval suite (eval retrieval)
 
 `)
 }
 
 // registry is the tool set. serve and work must agree on its names: the API
 // fills a run's default allowlist from it, the worker dispatches through it.
-// Only the worker has a sandbox executor; serve passes nil and gets a python
-// tool it can list and allowlist but not run.
-func registry(exec sandbox.Executor, limits sandbox.Limits) *tools.Registry {
-	return tools.NewRegistry().MustRegister(builtin.Finish{}, builtin.ComputeDeadline{}, python.New(exec, limits))
+// Only the worker has a sandbox executor, an embedder, and a store; serve
+// passes nils and gets tools it can list and allowlist but not run.
+func registry(exec sandbox.Executor, limits sandbox.Limits, searcher corpus.Searcher, docs corpus.Store) *tools.Registry {
+	return tools.NewRegistry().MustRegister(builtin.Finish{}, builtin.ComputeDeadline{}, python.New(exec, limits),
+		corpus.NewSearch(searcher), corpus.NewFetch(docs))
 }
 
 func serve(ctx context.Context, args []string) error {
@@ -102,7 +114,7 @@ func serve(ctx context.Context, args []string) error {
 	}
 	defer st.Close()
 
-	srv := api.NewServer(st, log, api.Options{PollInterval: *poll, Registry: registry(nil, sandbox.DefaultLimits())})
+	srv := api.NewServer(st, log, api.Options{PollInterval: *poll, Registry: registry(nil, sandbox.DefaultLimits(), nil, nil)})
 	return srv.ListenAndServe(ctx, *addr)
 }
 
@@ -124,13 +136,15 @@ func work(ctx context.Context, args []string) error {
 	sandboxImage := fs.String("sandbox-image", envOr("AGENTD_SANDBOX_IMAGE", defaultSandboxImage), "container image for sandboxed tools (build with `make sandbox-build`)")
 	sandboxTimeout := fs.Duration("sandbox-timeout", envDurationOr("AGENTD_SANDBOX_TIMEOUT", sandbox.DefaultLimits().DefaultTimeout), "default wall-clock limit per sandboxed tool call")
 	sandboxMaxTimeout := fs.Duration("sandbox-max-timeout", envDurationOr("AGENTD_SANDBOX_MAX_TIMEOUT", sandbox.DefaultLimits().MaxTimeout), "the most a tool call may ask for via timeout_seconds")
+	ef := addEmbedFlags(fs)
+	rf := addRerankFlags(fs)
 	skipMigrate := fs.Bool("skip-migrate", false, "do not apply migrations at startup")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
 	log := newLogger("work")
-	provider, err := buildProvider(*modelURL, *modelTimeout, *anthropicPrices, *thinkingDisplay, log)
+	provider, onBox, err := buildProvider(*modelURL, *modelTimeout, *anthropicPrices, *thinkingDisplay, log)
 	if err != nil {
 		return err
 	}
@@ -139,19 +153,36 @@ func work(ctx context.Context, args []string) error {
 		return err
 	}
 	defer exec.Close()
+
+	embedder := ef.buildEmbedder(*modelURL)
+	if err := probeEmbedder(ctx, embedder, log); err != nil {
+		return err
+	}
+	reranker, rerankModel, err := rf.buildReranker(onBox, *modelName, log)
+	if err != nil {
+		return err
+	}
+	if reranker != nil {
+		log.Info("reranker ready", "model", rerankModel, "candidates", *rf.candidates)
+	}
+
 	st, err := open(ctx, *dsn, log, !*skipMigrate)
 	if err != nil {
 		return err
 	}
 	defer st.Close()
 
+	searcher := &retrieval.Searcher{
+		Store: st, Embedder: embedder, Reranker: reranker,
+		RerankCandidates: *rf.candidates, Log: log,
+	}
 	w := runtime.NewWorker(st, log, runtime.WorkerConfig{
 		Owner:          *owner,
 		PollInterval:   *poll,
 		LeaseDuration:  *lease,
 		ReaperInterval: *reaper,
 		Provider:       provider,
-		Registry:       registry(exec, exec.Limits()),
+		Registry:       registry(exec, exec.Limits(), searcher, st),
 		DefaultModel:   *modelName,
 	})
 	return w.Run(ctx)
@@ -188,15 +219,17 @@ func buildSandbox(ctx context.Context, image string, limits sandbox.Limits, log 
 // "claude-*" model names. Anthropic is always registered: credentials are
 // only needed once a run actually targets it, and a missing key then fails
 // that run with a clear authentication error rather than the whole worker.
-func buildProvider(modelURL string, timeout time.Duration, prices, thinkingDisplay string, log *slog.Logger) (model.Provider, error) {
+// The local provider is also returned bare for the reranker, which must not
+// spend hosted-API money outside a run's budget.
+func buildProvider(modelURL string, timeout time.Duration, prices, thinkingDisplay string, log *slog.Logger) (model.Provider, *local.Provider, error) {
 	extra, err := anthropic.ParsePrices(prices)
 	if err != nil {
-		return nil, fmt.Errorf("-anthropic-prices: %w", err)
+		return nil, nil, fmt.Errorf("-anthropic-prices: %w", err)
 	}
 	switch thinkingDisplay {
 	case "", "summarized", "omitted":
 	default:
-		return nil, fmt.Errorf("-anthropic-thinking-display: want summarized or omitted, got %q", thinkingDisplay)
+		return nil, nil, fmt.Errorf("-anthropic-thinking-display: want summarized or omitted, got %q", thinkingDisplay)
 	}
 	onBox := local.New(local.Config{
 		BaseURL: modelURL,
@@ -210,9 +243,10 @@ func buildProvider(modelURL string, timeout time.Duration, prices, thinkingDispl
 	})
 	log.Info("model backends", "local", modelURL, "anthropic_api_key_set", os.Getenv("ANTHROPIC_API_KEY") != "",
 		"anthropic_extra_prices", len(extra))
-	return model.NewRouter().
+	router := model.NewRouter().
 		Register("local", onBox, nil).
-		Register("anthropic", hosted, anthropic.IsClaudeModel), nil
+		Register("anthropic", hosted, anthropic.IsClaudeModel)
+	return router, onBox, nil
 }
 
 func migrate(ctx context.Context, args []string) error {

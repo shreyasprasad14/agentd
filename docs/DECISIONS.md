@@ -235,3 +235,102 @@ orphan keeps its CPU and memory until something notices. Age is the safe test: a
 than the longest any call may run cannot belong to a live worker, and a younger one might belong
 to a healthy sibling. Sweeping on boot rather than on a timer keeps it out of the hot path and
 covers the case that matters (a restart after a crash) without a second reaper.
+
+## ADR-17: The corpus comes from the CourtListener REST API, not the bulk export
+
+**Decision.** `agentd fetch` pulls opinions through the REST v4 API (`/search/` filtered by
+court and filing date, then `/opinions/{id}/` for the text), writing one JSON object per line.
+`agentd ingest` reads only that JSONL.
+
+**Why.** The bulk export is a multi-gigabyte opinions file plus separate clusters, dockets, and
+courts files that have to be joined locally just to filter by jurisdiction. The API filters
+server-side, pages by cursor, and a few thousand opinions is a few thousand requests, well
+inside the authenticated rate limit. For a corpus the spec sizes at "one jurisdiction, a few
+thousand opinions", the join is all cost and no benefit.
+
+**Boundary.** The fetch/ingest split is where the corpus source is swappable: a different court,
+the bulk CSVs, or a synthetic poisoned document set for the M5 `INJECTION` evals is a different
+producer of the same JSONL, with nothing downstream changing. Planting a hostile document is a
+one-line edit to a file.
+
+**Cost.** Two requests per opinion and a free token in `COURTLISTENER_TOKEN`. Past a few thousand
+documents the bulk path is the answer; the client honours `Retry-After` and resumes from an
+existing output file, so an interrupted pull is restartable rather than restarted.
+
+## ADR-18: Fusion happens in Go, not in SQL
+
+**Decision.** `SearchVector` (HNSW, top 50) and `SearchLexical` (GIN + `websearch_to_tsquery`,
+top 50) are two plain indexed queries that run concurrently, and Reciprocal Rank Fusion over
+their results is twenty lines of Go.
+
+**Why.** The eval needs the two lists *separately* to report vector-only and BM25-only rows, so
+a single CTE that fuses internally would have to be written twice: once for the tool and once
+for the eval. Two queries and a pure function means "hybrid" in the README table is literally
+the same code the `search_corpus` tool runs, with the fusion step measurable in isolation and
+testable without a database. RRF also needs no score normalisation between cosine distance and
+`ts_rank_cd`, which is the thing that makes a SQL fusion query fiddly.
+
+**Detail.** `k = 60`, ties broken by vector rank then chunk id so results are deterministic.
+Queries set `hnsw.ef_search = 100` for the transaction: the index default of 40 starves a
+top-50 candidate list.
+
+## ADR-19: The reranker is an LLM through the existing provider seam
+
+**Decision.** `rerank.Reranker` is the interface; the M3 implementation scores candidates
+pointwise (0–10, batches of ten, temperature 0, JSON out) through the same `model.Provider` the
+loop uses. No cross-encoder, no second inference server.
+
+**Why.** There is no Go cross-encoder runtime, and llama.cpp's `/v1/rerank` means standing up
+and operating a second server for one step of one tool. Pointwise scoring reuses the local model
+that is already running, costs nothing, and sits behind an interface a cross-encoder can replace
+without touching the searcher.
+
+**Degradation is the important part.** Any provider error, or a batch whose output does not
+parse, scores that batch zero and is logged; the fused RRF order is returned and the result says
+`mode: "hybrid"` rather than `hybrid+rerank`. A reranker outage costs recall, never the run. The
+eval refuses to *silently* accept this: a `hybrid+rerank` row that degraded is an error, because
+a table row labelled rerank that actually measured hybrid is worse than no row.
+
+**Cost, stated plainly.** The reranker's model calls happen inside a tool, so their tokens are
+**not** counted in the run's `spent_usd`. With a local model that is $0 and honest. Pointing it
+at Claude would spend real money outside the budget, so M3 refuses a non-local rerank model;
+attributing tool-internal model cost to the run (a `cost_micro_usd` on `tool_succeeded`) is an
+M4 item with the rest of the cost work.
+
+## ADR-20: Chunk structure first, size second, with one-sentence overlap
+
+**Decision.** Text is split into paragraphs; a short line that is numbered, all caps, or title
+case is a *section heading*, carried as a label on every chunk beneath it rather than becoming a
+chunk of its own. Paragraphs merge until 1,200 characters, hard-capped at 1,800 with sentence-
+aligned splitting for oversize paragraphs, and each chunk is prefixed with the previous chunk's
+last sentence (≤ 200 characters).
+
+**Why.** Retrieval returns a *citable unit*, and in an opinion that unit is a passage under a
+heading, not a fixed-width window. Carrying `II. Analysis` on every chunk under it means a hit
+tells the model where in the opinion it is without a second fetch. The sizes are set by the
+embedding model: 1,200 characters is about 300 tokens, comfortably inside
+`mxbai-embed-large`'s 512-token window with the query prefix attached.
+
+**Why overlap is one sentence and not more.** A holding that straddles a chunk boundary is
+otherwise retrievable from neither side. One sentence is enough to carry it; more inflates the
+index and, worse, makes duplicate hits for the same passage compete in the fused ranking.
+
+**Boundary.** `Chunk(text)` is pure, and the tests assert the invariants that make ordinals
+citable: contiguous `0..n-1`, `char_start`/`char_end` covering the input, nothing over the cap.
+
+## ADR-21: Ingest is idempotent per document, in one transaction
+
+**Decision.** Each document is upserted, its chunks deleted, and its new chunks inserted inside a
+single transaction. A document is skipped when its `content_sha256`, chunk count, *and* the
+embedding model recorded on its chunks all match; `-force` overrides.
+
+**Why.** Ingesting a real corpus takes minutes and will be interrupted. Per-document atomicity
+means a crash leaves every committed document whole and every unstarted one absent, so
+re-running finishes the rest instead of starting over or, worse, leaving a document with half
+its chunks embedded and silently under-retrievable.
+
+**Why the embedding model is part of the key.** The stored vector is only meaningful next to
+the model that produced it; a corpus half-embedded by `mxbai-embed-large` and half by `bge-m3`
+returns nonsense rankings with no error anywhere. Recording `embedding_model` per chunk row
+makes "which model produced this vector" answerable, and makes switching models a re-ingest that
+the tool performs by itself rather than an operator remembering to pass `-force`.

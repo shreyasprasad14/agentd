@@ -2,7 +2,7 @@
 
 A control plane for running LLM agents as durable, resumable, sandboxed, observable jobs.
 
-**Status: M2 (sandbox) complete.** Retrieval, tracing, and evals are not implemented yet.
+**Status: M3 (retrieval) complete.** Tracing and the eval harness are not implemented yet.
 
 ## M1 — Real loop + durability
 
@@ -145,16 +145,134 @@ closes the one gap that the flag set cannot. Firecracker becomes the answer when
 hosts and the isolation boundary has to survive a kernel bug by construction rather than by
 interposition. The path is written down in order in `docs/SECURITY.md`.
 
+## M3 — Retrieval
+
+A legal research question is answered from a real corpus of court opinions, with citations that
+resolve to real rows, and the retrieval quality is measured rather than asserted.
+
+The corpus arrives in two steps that stay separate on purpose. `agentd fetch` pulls opinions
+from the CourtListener REST API into a JSONL file (one lead opinion per decision, HTML converted
+to text, resumable, `Retry-After` honoured); `agentd ingest` chunks, embeds, and upserts that
+file. Ingest reads *only* that format, so swapping the corpus source — a different court, the
+bulk export, or a synthetic poisoned document set for M5's injection evals — never touches the
+pipeline (ADR-17).
+
+Chunking is structure first, size second. Paragraphs are the unit; a short line that is
+numbered, all caps, or title case is a *section heading* and becomes a label carried by every
+chunk beneath it rather than a chunk of its own, so a hit says `II. Analysis` without a second
+lookup. Paragraphs merge to ~1,200 characters (about 300 tokens, inside `mxbai-embed-large`'s
+512-token window with the query prefix), hard-capped at 1,800 with sentence-aligned splitting,
+and each chunk carries the previous chunk's last sentence as overlap so a holding that straddles
+a boundary is retrievable from either side (ADR-20). Ingest is idempotent per document in one
+transaction, keyed on the content hash *and* the embedding model, so an interrupted corpus load
+resumes and a model change re-embeds by itself rather than silently mixing vector spaces
+(ADR-21).
+
+Search is two indexed queries run concurrently — HNSW top 50 by cosine distance, GIN top 50 by
+`ts_rank_cd` — fused with Reciprocal Rank Fusion in Go, then reranked. Fusion is Go rather than
+one clever CTE because the eval needs the two lists separately to report per-mode numbers, and
+because RRF needs no score normalisation between cosine distance and a text rank (ADR-18). The
+reranker scores candidates pointwise through the existing `model.Provider`, which reuses the
+local model already running instead of standing up a cross-encoder service (ADR-19). It degrades
+rather than fails: a provider error or an unparseable batch returns the fused order and reports
+`mode: "hybrid"`, because a reranker outage should cost recall, not the run.
+
+Two things about that reranker worth saying out loud. It is **the slow step**: with `qwen2.5:7b`
+on a laptop it is roughly 30 seconds per query against 50 candidates, against 0.3 seconds for
+everything before it, which is why `-rerank-candidates` is a flag and `-rerank=false` exists. And
+its model calls happen *inside a tool*, so their tokens are **not** counted in the run's
+`spent_usd`. With a local model that is $0 and true; pointing it at Claude would spend real money
+outside the budget, so a non-local rerank model is refused until M4 attributes tool-internal cost
+to the run.
+
+Two tools reach it, both builtin tier and read-only: `search_corpus` (query, `k`, optional court
+and date filters) and `fetch_document` (by id or `source_id`, optionally a range of ordinals).
+Results are bounded twice — chunks are ≤ 1,800 characters by construction, and each tool caps its
+serialised result with a `truncated` flag — so a document cannot crowd the context window the way
+an uncapped `stdout` could. Both tell the model to cite by `source_id` and paragraph `ordinal`,
+and the default system prompt now says the same and that opinion text is quoted data, never
+instructions. `docs/SECURITY.md` has the boundary in full.
+
+### What the eval measured, and the bug it caught
+
+`make eval-retrieval` runs every labeled query in all four modes and exits nonzero below the
+thresholds in `evals/retrieval/labels.yaml`. The four rows are the same code path with steps
+skipped, so the `hybrid` row is literally what the tool does.
+
+The first run said BM25 recall@8 was **0.154**. That was not a weak baseline, it was a bug:
+`websearch_to_tsquery` ANDs its terms, which is right for a search box and wrong for an agent,
+because a model sends a whole question and requiring all ten lexemes to appear in one
+1,200-character chunk matches essentially nothing. The lexical query now normalises the question
+through the same dictionary that built the index and ORs the lexemes, leaving `ts_rank_cd` — a
+cover-density rank, so proximity and phrase order already score higher — to discriminate. Same
+corpus, same labels, recall@8 went **0.154 → 1.000**. That is the entire reason the milestone
+has an eval instead of a paragraph asserting the search works.
+
+Against the checked-in 12-opinion fixture, 13 labeled queries, `mxbai-embed-large` embeddings and
+`qwen2.5:7b` reranking (`make ingest-fixture && make eval-retrieval`):
+
+| mode | recall@8 | recall@20 | recall@50 | MRR | wall time |
+|---|---|---|---|---|---|
+| vector | 1.000 | 1.000 | 1.000 | 1.000 | 0.3 s |
+| bm25 | 1.000 | 1.000 | 1.000 | 0.923 | 0.01 s |
+| hybrid | 1.000 | 1.000 | 1.000 | 1.000 | 0.3 s |
+| hybrid+rerank | 1.000 | 1.000 | 1.000 | 1.000 | 388 s |
+
+Read that table for what it is: twelve well-known opinions with one query written per case is a
+**smoke test**, not a benchmark. Every mode saturates because with twelve documents the right
+answer is rarely outside the top eight of anything, and the only number that moves is BM25's MRR
+— one query where the lexically-best chunk is not the one labeled. It is checked in because it
+runs in seconds with no corpus pull and it does catch real breakage (it caught the AND-semantics
+bug), but the numbers that discriminate between vector, BM25, and hybrid need a corpus with
+thousands of near-neighbours, where the labeling is the two-hour job the plan budgets for:
+
+```bash
+make fetch-corpus COURT=scotus LIMIT=2500   # needs COURTLISTENER_TOKEN; resumable
+make ingest
+agentd eval retrieval -label "your query"   # prints top-20 hits to hand-label
+make eval-retrieval
+```
+
+`evals/retrieval/results.json` carries every run's numbers next to the corpus size and the
+embedding and rerank model names, so a table can be traced to the run that produced it.
+
+### The retrieval demo
+
+`make ingest-fixture` then `make demo-legal` submits a research question with only
+`search_corpus`, `fetch_document`, and `finish` granted, so the model has to find the case,
+read it, and cite it:
+
+The recorded trajectory with `qwen2.5:7b`, verbatim:
+
+```
+# id:  3 / event: model_responded  (tool_use: search_corpus)
+# id:  5 / event: tool_succeeded   search_corpus  mode=hybrid hits=3 top=clop-0002
+# id:  7 / event: model_responded  (tool_use: fetch_document)
+# id:  9 / event: tool_succeeded   fetch_document doc=clop-0002 chunks=1
+# id: 11 / event: model_responded  (tool_use: finish)
+# id: 14 / event: run_finished     "In Carpenter v. United States (clop-0002 ¶1), the Supreme Court
+#                                   held that the Government's acquisition of historical cell-site
+#                                   location records is a Fourth Amendment search..."
+```
+
+`clop-0002 ¶1` is a row in `chunks`, and its text is the sentence the answer paraphrases. The
+loop integration test asserts that whole shape against pgvector with a fake model and a fake
+embedder — search, then fetch, then finish, with the cited `(source_id, ordinal)` resolved
+against the table — which is the convention M5's `CITATION` eval will check answers against. A
+sibling test asserts that a run allowlisted without `search_corpus` gets a non-retryable
+`tool_failed` when the model reaches for it anyway.
+
 ## Quickstart
 
-You need Docker, Go 1.25, and [Ollama](https://ollama.com) on the host. For Claude, export
+You need Docker, Go 1.26, and [Ollama](https://ollama.com) on the host. For Claude, export
 `ANTHROPIC_API_KEY` before `make up` (or `make work`); without it local runs are unaffected and
 runs that target Claude fail with an authentication error.
 
 ```bash
 brew install ollama && ollama serve &   # or the desktop app
-make model-pull                         # ollama pull qwen2.5:7b
+make model-pull                         # ollama pull qwen2.5:7b and mxbai-embed-large
 make up                                 # builds agentd/sandbox:python, then Postgres 16 (pgvector), Jaeger, api, worker
+make ingest-fixture                     # optional: load the 12-opinion corpus so the retrieval tools have something to find
 
 curl -X POST localhost:8080/v1/runs \
   -H 'content-type: application/json' \
@@ -265,8 +383,15 @@ daemon or the sandbox image is missing at boot the worker logs a warning and kee
 bare `claude-*` id, or anything else for the local runtime), `system_prompt`, `tools`
 (allowlist; defaults to every registered tool, `run_python` included, and is fixed at
 submission), `max_tokens`, `tool_delay_ms` (demo only). Unknown fields and unknown tool names
-are rejected with 400. Registered tools: `compute_deadline` and `finish` (builtin), `run_python`
-(sandboxed).
+are rejected with 400. Registered tools: `compute_deadline`, `finish`, `search_corpus`, and
+`fetch_document` (builtin), `run_python` (sandboxed).
+
+Corpus ingestion is an operator action, not an API call: it takes minutes and needs the
+embedding runtime, so it ships as `agentd fetch` and `agentd ingest`. `POST /v1/corpus/ingest`
+(spec §13) is a thin async wrapper over the same code and lands with the other API polish in
+M6. The API server lists and allowlists the corpus tools but cannot run them; only a worker has
+the embedder and the store handle, so a search submitted to a worker without one comes back as
+a retryable `tool_failed` rather than a wrong answer.
 
 ## Event log
 
@@ -292,10 +417,18 @@ worse than one that refuses.
 make test                 # unit + testcontainers integration tests + sandbox tests; requires Docker
 make test-short           # unit tests only
 make test-sandbox         # the Docker executor tests and the SAFETY probes, verbose
+make test-retrieval       # the pgvector-backed retrieval tests alone; Docker, no model
 make test-live            # one real call to Ollama; requires the model pulled
 make test-live-anthropic  # two real calls to Claude (a tool call, then the tool result
                           # with the thinking turn echoed back); needs ANTHROPIC_API_KEY
 ```
+
+Nothing in `make test` calls Ollama. The retrieval tests use a deterministic hash-based fake
+embedder, so a test corpus has real nearest-neighbour structure with no model anywhere: chunking,
+RRF, HTML-to-text, the reranker's parser, and both tools are unit-tested, while ingest
+idempotency, the two index queries, and the full search-read-cite trajectory run against real
+pgvector. The real embedder and reranker are exercised by `make eval-retrieval` and
+`make demo-legal`, which are M3's equivalent of `make test-live`.
 
 The Anthropic provider's unit tests point the real SDK client at an `httptest` server, so the
 wire body is asserted exactly: thinking blocks echoed in order, tool schemas passed through with
@@ -310,14 +443,16 @@ propagation, schema bounds) is covered without Docker.
 ## Layout
 
 ```
-cmd/agentd/            # serve | work | migrate
+cmd/agentd/            # serve | work | migrate | fetch | ingest | eval
 internal/api/          # handlers, SSE tail, config normalisation
 internal/runtime/      # event payloads, Reduce, the loop, worker (claim/heartbeat/reaper)
 internal/model/        # Provider interface, pricing, Router; local/ (OpenAI-compatible), anthropic/ (Claude), fake/ (tests)
-internal/tools/        # Tool interface, registry + schema validation; builtin/ (finish, compute_deadline); python/ (sandboxed)
+internal/tools/        # Tool interface, registry + schema validation; builtin/, python/ (sandboxed), corpus/ (retrieval)
 internal/sandbox/      # Executor interface, Docker executor, limits, output capping, safety tests
-internal/store/        # Postgres access, fenced writes, ledger, embedded migrations
+internal/retrieval/    # Searcher + RRF; chunk/, embed/ (Ollama + fake), courtlistener/, rerank/, eval/
+internal/store/        # Postgres access, fenced writes, ledger, corpus queries, embedded migrations
 internal/testutil/     # shared testcontainers Postgres fixture
+evals/retrieval/       # checked-in fixture corpus, labeled queries, results.json
 scripts/crash-demo.sh  # the kill -9 demo
 scripts/compare-providers.sh  # one goal, both providers, trajectories side by side
 docs/DECISIONS.md      # ADRs
@@ -344,3 +479,11 @@ SSE polls the log at 200ms rather than `LISTEN/NOTIFY`; the terminal status and
 
 Human-in-the-loop approval flows are out of scope for v1 (spec §2) and would slot in as an
 `approval_requested` / `approval_granted` event pair that suspends the loop.
+
+Deferred deliberately, with the seam already in place: `POST /v1/corpus/ingest` is an async
+wrapper over `agentd ingest` and lands with the other API polish in M6; attributing a
+reranker's model calls to the run's `spent_usd` needs a `cost_micro_usd` on `tool_succeeded`
+and lands with M4's cost work, which is why M3 refuses a hosted rerank model rather than
+spending outside a budget; a cross-encoder reranker is a second implementation of
+`rerank.Reranker`; and planted-document injection tests are M5, which the JSONL ingest format
+was shaped to make a one-line edit.
