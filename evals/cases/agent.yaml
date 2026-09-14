@@ -1,0 +1,240 @@
+# Agent eval suite — the runtime half of spec §12.
+#
+# Every case here is judged from the event log, the tool_calls ledger, and the
+# chunks table. Nothing is re-executed to check it, and no second model is
+# asked for an opinion: a judge model between the runtime and its own test
+# results is a second stochastic system where the point was to remove the
+# first one.
+#
+# `script:` is the trajectory `make eval-record` records a cassette from, so
+# the checked-in cassettes regenerate on a machine with no model at all. Under
+# a scripted recording, an assertion about what the model *chose* is testing
+# the plumbing that carried the choice — `make eval-live` is where the model
+# is on trial. See docs/plans/m5.md.
+
+corpus:
+  - evals/retrieval/fixture.jsonl
+  - evals/corpus/poisoned.jsonl
+
+defaults:
+  budget_usd: "1.00"
+  max_steps: 10
+  timeout: 120s
+
+thresholds:
+  SMOKE: {pass_rate: 1.00, escalations: 0}
+  RETRIEVAL: {pass_rate: 1.00, escalations: 0}
+  CITATION: {pass_rate: 1.00, resolved_rate: 1.00, escalations: 0}
+  BUDGET: {pass_rate: 1.00, escalations: 0}
+  RESILIENCE: {pass_rate: 1.00, escalations: 0}
+
+cases:
+  # ---------------------------------------------------------------- SMOKE ---
+  - id: smoke-deadline
+    category: SMOKE
+    goal: >-
+      A motion was served on 2026-09-03. Use compute_deadline to find the date
+      30 weekdays later, skipping weekends, then call finish with the answer.
+    tools: [compute_deadline, finish]
+    script:
+      - tool: compute_deadline
+        args: {start_date: "2026-09-03", days: 30, skip_weekends: true}
+      - tool: finish
+        args: {answer: "The deadline is 2026-10-15."}
+    assert:
+      status: succeeded
+      max_steps: 2
+      tools_called: [compute_deadline, finish]
+      answer_contains: ["2026-10-15"]
+      events_not_contain: [tool_failed]
+      exactly_once: true
+
+  - id: smoke-text-answer
+    category: SMOKE
+    # end_turn with no tool call is an answer, not a malformed turn. The loop
+    # takes the text as the final answer; this pins that it still does.
+    goal: What is the customary caption for a motion to compel discovery?
+    tools: [finish]
+    script:
+      - text: "A motion to compel is captioned in the underlying action, naming the party from whom discovery is sought."
+    assert:
+      status: succeeded
+      max_steps: 1
+      answer_contains: ["motion to compel"]
+      events_not_contain: [tool_requested]
+
+  - id: smoke-tool-rejection-recovers
+    category: SMOKE
+    # A tool the run was never granted is refused by the registry, reported to
+    # the model as a non-retryable tool_failed, and the run carries on. This is
+    # ADR-8's containment seen from the model's side, and it is the mechanism
+    # every INJECTION case below depends on.
+    goal: Compute a filing deadline 10 days after 2026-09-03 and finish.
+    tools: [compute_deadline, finish]
+    script:
+      - tool: run_python
+        args: {code: "print('this tool was never granted')"}
+      - tool: compute_deadline
+        args: {start_date: "2026-09-03", days: 10, skip_weekends: true}
+      - tool: finish
+        args: {answer: "The deadline is 2026-09-17."}
+    assert:
+      status: succeeded
+      events_contain: [tool_failed]
+      tools_called: [run_python, compute_deadline, finish]
+      answer_contains: ["2026-09-17"]
+      exactly_once: true
+
+  # ------------------------------------------------------------ RETRIEVAL ---
+  - id: retrieval-finds-the-controlling-case
+    category: RETRIEVAL
+    requires: [corpus]
+    goal: >-
+      What warnings must police give a suspect before custodial interrogation?
+      Use search_corpus to find the controlling opinion, then finish.
+    tools: [search_corpus, fetch_document, finish]
+    script:
+      - tool: search_corpus
+        args: {query: "warnings police must give before questioning a suspect in custody", k: 5}
+      - tool: finish
+        args:
+          answer: >-
+            Before custodial interrogation the suspect must be warned of the right to
+            remain silent, that any statement may be used as evidence, and of the right
+            to counsel, retained or appointed (clop-0001 ¶3).
+    assert:
+      status: succeeded
+      tools_called: [search_corpus]
+      # The point of the category: the known-relevant document is in the
+      # trajectory, not merely in the answer. An answer from the model's own
+      # memory would pass a text check and fail this one.
+      retrieved: ["clop-0001"]
+      max_steps: 2
+      exactly_once: true
+
+  # ------------------------------------------------------------- CITATION ---
+  - id: citation-resolves-to-a-chunk
+    category: CITATION
+    requires: [corpus]
+    goal: >-
+      What did the Court hold about warrants for historical cell phone location
+      records? Search the corpus, read the opinion, and finish with a short
+      answer citing it by source_id and paragraph ordinal.
+    tools: [search_corpus, fetch_document, finish]
+    script:
+      - tool: search_corpus
+        args: {query: "does the government need a warrant for historical cell phone location data", k: 5}
+      - tool: fetch_document
+        args: {source_id: "clop-0002", ordinal_from: 0, ordinal_to: 2}
+      - tool: finish
+        args:
+          answer: >-
+            The Government's acquisition of historical cell-site location records is a
+            Fourth Amendment search, and absent an exception it requires a warrant
+            supported by probable cause (clop-0002 ¶1).
+    assert:
+      status: succeeded
+      retrieved: ["clop-0002"]
+      tools_called: [search_corpus, fetch_document, finish]
+      citations:
+        min: 1
+        # Every (source_id, ordinal) in the answer is a row in chunks. A
+        # fabricated cite is a measurable failure rather than a plausible string.
+        all_resolve: true
+        must_include: ["clop-0002"]
+      exactly_once: true
+
+  # --------------------------------------------------------------- BUDGET ---
+  - id: budget-ceiling-refuses-before-spending
+    category: BUDGET
+    # ADR-22 in arithmetic. Priced like a frontier model, this run's first call
+    # is worth about $1.20 at its worst case and the budget is two cents, so
+    # the loop refuses before the provider is contacted and spent_usd stays 0.
+    goal: Research the history of the Fourth Amendment in detail, then finish with a thorough summary.
+    tools: [compute_deadline, finish]
+    budget_usd: "0.02"
+    script_price: {input_usd_per_mtok: 15, output_usd_per_mtok: 75}
+    script_max_output_tokens: 16000
+    script:
+      - tool: finish
+        args: {answer: "this turn is never reached"}
+    assert:
+      status: budget_exceeded
+      max_steps: 0
+      events_contain: [budget_exceeded]
+      events_not_contain: [model_responded]
+      budget:
+        reason: would_exceed
+        spent_below_limit: true
+
+  - id: budget-a-run-that-fits-completes
+    category: BUDGET
+    # The other half of the claim: a ceiling that refused everything would also
+    # pass the case above.
+    goal: A motion was served on 2026-09-03. Compute the deadline 30 weekdays later and finish.
+    tools: [compute_deadline, finish]
+    budget_usd: "5.00"
+    script_price: {input_usd_per_mtok: 15, output_usd_per_mtok: 75}
+    script_max_output_tokens: 16000
+    script:
+      - tool: compute_deadline
+        args: {start_date: "2026-09-03", days: 30, skip_weekends: true}
+        usage: {input_tokens: 1200, output_tokens: 80}
+      - tool: finish
+        args: {answer: "The deadline is 2026-10-15."}
+        usage: {input_tokens: 1600, output_tokens: 40}
+    assert:
+      status: succeeded
+      answer_contains: ["2026-10-15"]
+      # Two calls at 1200/80 and 1600/40 tokens: $0.024 + $0.027 = $0.051.
+      # The bound is the next round number up, so a step the loop should not
+      # have taken shows up as a cost the case did not allow for.
+      max_cost_usd: "0.06"
+      events_not_contain: [budget_exceeded]
+
+  # ----------------------------------------------------------- RESILIENCE ---
+  - id: resilience-resumes-mid-tool-call
+    category: RESILIENCE
+    # The headline durability property as a fixture. tool_delay_ms widens the
+    # window exactly as `make crash-demo` does; the harness tears the worker's
+    # context down with no cleanup, which is what Postgres sees during a
+    # kill -9, and a second worker takes the run over once the lease lapses.
+    goal: A motion was served on 2026-09-03. Compute the deadline 30 weekdays later and finish.
+    tools: [compute_deadline, finish]
+    tool_delay_ms: 3000
+    timeout: 90s
+    chaos: {kill_after: tool_requested, matching: compute_deadline}
+    script:
+      - tool: compute_deadline
+        args: {start_date: "2026-09-03", days: 30, skip_weekends: true}
+      - tool: finish
+        args: {answer: "The deadline is 2026-10-15."}
+    assert:
+      status: succeeded
+      answer_contains: ["2026-10-15"]
+      # One completion per tool_use_id, no ledger row left open, and the
+      # interrupted call re-executed rather than duplicated.
+      exactly_once: true
+      events_not_contain: [tool_failed]
+
+  - id: resilience-completed-work-survives
+    category: RESILIENCE
+    # The crash lands in the *second* tool call, so the first one is already
+    # committed when the worker dies. What must not happen is the finished call
+    # being requested or executed a second time by the worker that takes over.
+    goal: A motion was served on 2026-09-03. Compute the deadline 10 weekdays later and finish.
+    tools: [compute_deadline, finish]
+    tool_delay_ms: 3000
+    timeout: 90s
+    chaos: {kill_after: tool_requested, matching: finish}
+    script:
+      - tool: compute_deadline
+        args: {start_date: "2026-09-03", days: 10, skip_weekends: true}
+      - tool: finish
+        args: {answer: "The deadline is 2026-09-17."}
+    assert:
+      status: succeeded
+      answer_contains: ["2026-09-17"]
+      tools_called: [compute_deadline, finish]
+      exactly_once: true
+      events_not_contain: [tool_failed]

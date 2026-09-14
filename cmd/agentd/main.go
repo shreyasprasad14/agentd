@@ -88,7 +88,7 @@ commands:
   migrate   apply database migrations and exit
   fetch     pull court opinions from CourtListener into a JSONL corpus file
   ingest    chunk, embed, and upsert a fetched corpus into Postgres
-  eval      run an eval suite (eval retrieval)
+  eval      run an eval suite (eval retrieval | eval suite | eval record)
   healthz   probe a serve or work process's /healthz and exit 0 or 1
 
 `)

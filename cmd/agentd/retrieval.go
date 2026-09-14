@@ -233,12 +233,23 @@ func ingestCmd(ctx context.Context, args []string) error {
 	return nil
 }
 
-// evalCmd dispatches `agentd eval <suite>`.
+// evalCmd dispatches `agentd eval <suite>`. The two suites measure different
+// things and share no code: retrieval is scored per query against hand labels,
+// agent runs are scored per trajectory against the event log (spec §12).
 func evalCmd(ctx context.Context, args []string) error {
-	if len(args) < 1 || args[0] != "retrieval" {
-		return fmt.Errorf("usage: agentd eval retrieval [flags]")
+	if len(args) < 1 {
+		return fmt.Errorf("usage: agentd eval <retrieval|suite|record> [flags]")
 	}
-	return evalRetrievalCmd(ctx, args[1:])
+	switch args[0] {
+	case "retrieval":
+		return evalRetrievalCmd(ctx, args[1:])
+	case "suite":
+		return evalSuiteCmd(ctx, args[1:], false)
+	case "record":
+		return evalSuiteCmd(ctx, args[1:], true)
+	default:
+		return fmt.Errorf("unknown eval suite %q (want retrieval, suite, or record)", args[0])
+	}
 }
 
 func evalRetrievalCmd(ctx context.Context, args []string) error {

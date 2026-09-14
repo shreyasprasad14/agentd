@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "case": "budget-ceiling-refuses-before-spending",
+  "recorded_at": "2026-09-14T18:59:55.440156Z",
+  "provider": "scripted",
+  "model": "qwen2.5:7b",
+  "price": {
+    "input_per_mtok_micro_usd": 15000000,
+    "output_per_mtok_micro_usd": 75000000
+  },
+  "max_output_tokens": 16000,
+  "volatile": [
+    "duration_ms",
+    "chunk_id",
+    "document_id",
+    "score",
+    "document.id"
+  ],
+  "entries": null
+}

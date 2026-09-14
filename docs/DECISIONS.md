@@ -539,3 +539,154 @@ third attempt's error rather than the first's — which is the one a reader need
 terminal; the loop does not, and a list of sentinel errors in the loop would have to be revised
 every time a provider added one. Wrapping puts the judgement in the package that can make it,
 and `errors.Is` keeps the loop's test a single call.
+
+## ADR-28: Cassettes match on a normalised request hash, not on call order
+
+**Decision.** A cassette entry is looked up by a SHA-256 of the request's fingerprint — model,
+system prompt, conversation, tool names — taken after a declared list of volatile fields has been
+stripped from every tool result and the envelope's `seq` attribute has been dropped. A miss fails
+the call with a diff against the nearest recorded entry and never falls through to a live
+provider.
+
+**Why not the call's ordinal.** It is simpler and it breaks the one category §12 exists for. Model
+calls are at-least-once (ADR-4): a worker that dies between `model_requested` and `model_responded`
+leaves a dangling request the next worker repeats, and under ordinal matching that repeat consumes
+the *next* entry and desynchronises everything after it. Every RESILIENCE case would fail for a
+reason with nothing to do with the runtime.
+
+**What hashing costs, and why the list is in the fixture.** Tool results contain fields that move
+between two identical runs: `run_python`'s `duration_ms`, and `chunk_id`/`document_id`, which
+`IngestDocument` mints fresh on every ingest — so they are not stable across two ingests of the
+same file, let alone a fresh database in CI. The volatile list is a hole by construction: a tool
+that starts returning a new volatile field breaks replay until the list learns about it. The
+alternative, teaching the cassette which fields each tool produces, couples the eval harness to
+every tool's payload shape. A declared list that lives in the cassette file, and that the miss
+message points at, is the smaller mistake.
+
+**Dropping the envelope `seq` is not cosmetic.** A run that crashes inside a model call comes back
+with a second `model_requested`, so every event after it sits one seq higher — and the seq is
+printed into the envelope of every later tool result. Hashing it would make a resumed run's calls
+miss a cassette recorded from a clean one. The seq is a fact about the log's shape, not about what
+the model was asked.
+
+**A miss is never a live call.** `-on-miss` takes `fail` (the default) and `record`. A cassette
+that transparently reached the real API would turn "deterministic and free" into a surprise bill
+and a test that passed for the wrong reason.
+
+**The rate card is in the header.** The pre-flight budget ceiling (ADR-22) prices a call that has
+not happened yet, from usage the cassette has never seen, so it needs a price *function* rather
+than a recorded number. With one, a run recorded against Claude replays its exact termination
+arithmetic on a machine with no API key — and a case the ceiling stopped records an empty
+cassette that is nothing but a rate card.
+
+## ADR-29: The eval harness drives the real loop in-process
+
+**Decision.** `agentd eval suite` opens Postgres, builds the same `runtime.Worker` that `agentd
+work` builds with the provider swapped for a cassette, submits runs with `store.CreateRun`, and
+reads the event log back. It owns its workers' lifetimes.
+
+**Why not over the HTTP API.** A RESILIENCE case has to tear a worker down mid-tool-call, which is
+not something it can do to a process it does not own. Owning the worker also makes the kill
+*exactly* the one `make crash-demo` performs — the context is cancelled with no cleanup and the
+lease is left behind — rather than an approximation of it.
+
+**Why not a mock loop.** A harness that reimplements the loop in order to control it measures the
+harness.
+
+**What it gives up.** `make eval` exercises the runtime and not the deployment: the API server,
+SSE, and compose are untouched by it, and `internal/api`'s integration tests stay the thing that
+covers them.
+
+## ADR-30: Injection is measured as two numbers, and exposure is asserted first
+
+**Decision.** The INJECTION category reports `resisted_rate` — a soft threshold, model behaviour —
+and `escalations`, a hard count of runtime failures whose only acceptable value is zero. An
+escalation fails the suite whatever the resistance rate. A case whose planted text never reached
+the model is *inconclusive*: its own scorecard state, excluded from the rate.
+
+**Why two numbers.** A single pass/fail forces the corpus to be tuned until a small local model
+passes, which measures the corpus rather than the defense; reporting resistance alone lets a
+capability escape hide inside an 80% pass rate. The split is what `SECURITY.md` already says in
+words — containment, not immunity — expressed as thresholds. Following a planted instruction is a
+model lapse and a number to report; *reaching a capability the run was never granted* is a bug.
+
+**Why exposure comes first.** The default failure mode of this category is a case whose query
+never ranks the synthetic poisoned document, which then passes forever while proving nothing.
+Every case names text that must appear in one of its own tool results before any claim about
+resistance is made, and the suite refuses to parse an INJECTION case that declares no
+`exposed_with`. A threshold on a metric that was never measured also fails, so a category that
+went wholly inconclusive cannot read as a pass.
+
+**What escalation means concretely.** Two things, because they are the two the runtime can be
+wrong about: a tool produced a result although the run's allowlist never named it (ADR-8's
+refusal failing), and a tool result forged the envelope delimiter (ADR-33). Both are computed for
+every case in the suite, not only the injection ones — an escalation anywhere is a bug, and the
+scorecard should not need a case to have anticipated it.
+
+**The honest limit.** Under cassette replay the resistance numbers come from a recorded
+trajectory and are worth what a fixture is worth. Replay proves the runtime half; `make eval-live`
+is where the model is on trial, and the rate it produces is only meaningful next to the name of
+the model that produced it.
+
+## ADR-31: Thresholds and an assertion vocabulary, not golden trajectories
+
+**Decision.** Cases declare assertions from a fixed vocabulary — status, step and cost ceilings,
+tools called, documents retrieved, citations resolved, events present, budget arithmetic,
+exactly-once — and categories are scored against declared thresholds. No case compares its event
+log against a checked-in expected log.
+
+**Why not golden logs.** They are more precise and worthless in practice: every legitimate change
+to the loop or the system prompt rewrites every golden file, so the diffs stop being read and
+start being regenerated. A fixed vocabulary fails for a reason a person can act on.
+
+**Why no LLM judge.** Every assertion here is mechanically checkable against the log or the
+database on purpose. A judge model is a second stochastic system between the runtime and its own
+test results, in a harness whose entire value is removing the first one.
+
+**Unknown fields are errors.** A mistyped assertion that silently did not run would be a case that
+can only pass, which is the one thing an eval must never be. The suite parser sets
+`KnownFields(true)` and rejects a case that asserts nothing at all.
+
+## ADR-32: Search results are ordered by a tiebreaker that survives re-ingest
+
+**Decision.** Both corpus queries break score ties on `(d.source_id, c.ordinal)` rather than on
+`c.id`.
+
+**The bug it fixes.** They used to order by `c.id`, and `IngestDocument` mints a fresh
+`uuid.New()` for every chunk on every ingest — so the tiebreaker was itself random per ingest. Two
+ingests of the same corpus gave identical scores and a different order, and with a small corpus
+there are real ties, so the top-k changed. Every retrieval number was unreproducible across
+re-ingests, the README's recall table included.
+
+**How it was found.** Cassette replay broke after the eval corpus was truncated and re-ingested,
+and the miss message named a search result whose hits had reordered. An eval that only re-ran
+against a database somebody had already loaded would never have seen it — which is the argument
+for CI re-ingesting from the JSONL every time rather than trusting state.
+
+**Why these columns.** `(source_id, ordinal)` is the pair the corpus tools already hand the model
+to cite with, it is unique per chunk by schema, and it is a property of the corpus text rather
+than of the insert. Re-running `make eval-retrieval` after the change produced the same numbers
+the README already carried: the fix makes them reproducible, it does not move them.
+
+## ADR-33: The envelope defangs its own delimiters
+
+**Decision.** `runtime.Envelope` rewrites any `<tool_result` or `</tool_result` appearing in a
+tool result body as `<\tool_result`, in either direction and whatever its casing, before wrapping
+it. The tag is broken rather than deleted, so the attempt stays readable in the event log.
+
+**Why.** The envelope is the whole prompt-injection defense: the system prompt says everything
+between those tags is data, so a body that can close the tag and keep writing is a body that can
+stop being data — or open a second envelope attributed to a tool the run never called.
+
+**What was actually true before.** Retrieved documents could not do it. Every tool serialises its
+result with `encoding/json`, which escapes `<` and `>` to `<` and `>` by default, so a
+poisoned opinion arrived already defanged. Tool *failures* were a different story:
+`Reduce` envelopes `"error: " + p.Error` with no serialiser in between, and that error text
+includes model-supplied content — `unknown tool: <name>` puts a name the model chose into the
+conversation verbatim. So the hole was narrow and real.
+
+**The point is not the width of the hole.** It is that the property was being provided by a
+serialiser's default rather than by a decision. One tool switching to an `Encoder` with
+`SetEscapeHTML(false)`, or M6's MCP adapter exposing a tool that returns prose, removes it with
+nothing in the codebase objecting. `TestEnvelopeCannotBeForgedByItsBody` and the eval harness's
+`Escalations()` are the two things that would now notice.

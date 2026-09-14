@@ -3,8 +3,6 @@ package runtime
 import (
 	"cmp"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -642,7 +640,7 @@ func (l *Loop) modelStep(ctx context.Context, run *store.Run, state *State, req 
 	ev, err := l.store.AppendEvent(ctx, run.ID, l.owner, EventModelRequested, ModelRequestedPayload{
 		Step:           step,
 		Model:          req.Model,
-		MessagesSHA256: hashRequest(req),
+		MessagesSHA256: model.HashRequest(req),
 		Params:         ModelParams{MaxTokens: req.MaxTokens, Temperature: req.Temperature, Tools: cfg.Tools},
 	})
 	if err != nil {
@@ -1129,23 +1127,6 @@ func finalAnswer(content json.RawMessage) string {
 		return v.Answer
 	}
 	return string(content)
-}
-
-// hashRequest fingerprints what the model was asked, so cassette replay (M5)
-// can match a recorded response to its request.
-func hashRequest(req model.Request) string {
-	names := make([]string, len(req.Tools))
-	for i, t := range req.Tools {
-		names[i] = t.Name
-	}
-	raw, _ := json.Marshal(struct {
-		Model    string          `json:"model"`
-		System   string          `json:"system"`
-		Messages []model.Message `json:"messages"`
-		Tools    []string        `json:"tools"`
-	}{req.Model, req.System, req.Messages, names})
-	sum := sha256.Sum256(raw)
-	return hex.EncodeToString(sum[:])
 }
 
 // IsShutdown reports whether err means the worker is stopping rather than the

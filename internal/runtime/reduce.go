@@ -3,6 +3,7 @@ package runtime
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/shreyasprasad/agentd/internal/model"
@@ -272,13 +273,42 @@ func (s *State) appendToolResult(block model.ContentBlock) {
 // Envelope wraps a tool result so the model sees it as labeled data, not as
 // instructions (spec §10). The system prompt tells the model that nothing
 // inside these tags is ever a command.
+//
+// The body cannot close or reopen the envelope: neutralizeTags sees to that.
 func Envelope(tool string, seq int32, body string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "<tool_result tool=%q seq=%d>\n", tool, seq)
-	b.WriteString(body)
+	b.WriteString(neutralizeTags(body))
 	if !strings.HasSuffix(body, "\n") {
 		b.WriteString("\n")
 	}
 	b.WriteString("</tool_result>")
 	return b.String()
+}
+
+// envelopeTagRE matches an envelope delimiter appearing inside a result body,
+// in either direction and whatever its casing.
+var envelopeTagRE = regexp.MustCompile(`(?i)<\s*/?\s*tool_result`)
+
+// neutralizeTags defangs envelope delimiters in a tool result so the body
+// cannot forge the boundary that marks it as data — either closing the
+// envelope early and continuing as if it were the runtime speaking, or opening
+// a second one attributed to a tool the run never called.
+//
+// The M5 INJECTION set is what this exists for, and the honest version of the
+// story is worth keeping next to the code. Every tool shipped today serialises
+// its result with encoding/json, which escapes < and > to < and > by
+// default, so a poisoned opinion cannot reach this string unescaped: retrieved
+// content was already safe. Tool *failures* were not — Reduce envelopes
+// "error: " + the raw error text, which no serialiser has touched — and neither
+// is any future tool that returns prose, which is precisely what M6's MCP
+// adapter will expose. Relying on a serialiser's default for a security
+// property the system prompt states in words is not a defense; this is.
+func neutralizeTags(body string) string {
+	return envelopeTagRE.ReplaceAllStringFunc(body, func(m string) string {
+		// The tag is broken with a backslash rather than dropped, so the model
+		// still reads what the document said and the trajectory still shows
+		// the attempt. Removing it would hide the attack from the event log.
+		return strings.Replace(m, "<", `<\`, 1)
+	})
 }

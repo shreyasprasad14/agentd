@@ -154,8 +154,8 @@ The corpus arrives in two steps that stay separate on purpose. `agentd fetch` pu
 from the CourtListener REST API into a JSONL file (one lead opinion per decision, HTML converted
 to text, resumable, `Retry-After` honoured); `agentd ingest` chunks, embeds, and upserts that
 file. Ingest reads *only* that format, so swapping the corpus source — a different court, the
-bulk export, or a synthetic poisoned document set for M5's injection evals — never touches the
-pipeline (ADR-17).
+bulk export, or the synthetic poisoned document set M5's injection evals plant
+(`evals/corpus/poisoned.jsonl`) — never touches the pipeline (ADR-17).
 
 Chunking is structure first, size second. Paragraphs are the unit; a short line that is
 numbered, all caps, or title case is a *section heading* and becomes a label carried by every
@@ -258,9 +258,10 @@ The recorded trajectory with `qwen2.5:7b`, verbatim:
 `clop-0002 ¶1` is a row in `chunks`, and its text is the sentence the answer paraphrases. The
 loop integration test asserts that whole shape against pgvector with a fake model and a fake
 embedder — search, then fetch, then finish, with the cited `(source_id, ordinal)` resolved
-against the table — which is the convention M5's `CITATION` eval will check answers against. A
-sibling test asserts that a run allowlisted without `search_corpus` gets a non-retryable
-`tool_failed` when the model reaches for it anyway.
+against the table. That convention is what M5's `CITATION` eval checks answers against, one
+citation at a time, so a cite naming a real opinion and an invented paragraph fails. A sibling
+test asserts that a run allowlisted without `search_corpus` gets a non-retryable `tool_failed`
+when the model reaches for it anyway.
 
 ## M4 — Control and visibility
 
@@ -418,6 +419,123 @@ worker's metrics port is published with no fixed host port on purpose: `docker c
 --scale worker=2` — spec §2's two-worker lease demo — collides on the second replica the moment
 one is mapped, so Prometheus finds every replica by DNS and `docker compose port worker 9091`
 gets a host address when a human needs one.
+
+## M5 — Evals
+
+M0–M4 built mechanisms and wrote paragraphs claiming they work. `make eval` turns those claims
+into numbers, and it needs nothing but Postgres — no model, no API key, no network:
+
+```bash
+make up && make eval
+```
+```
+  category     cases  pass  fail  skip  incon.   metrics
+  SMOKE            3     3     0     0       0   pass_rate 1.000 (>= 1)  escalations 0 (<= 0)
+  RETRIEVAL        1     1     0     0       0   pass_rate 1.000 (>= 1)  escalations 0 (<= 0)
+  CITATION         1     1     0     0       0   pass_rate 1.000 (>= 1)  resolved_rate 1.000 (>= 1)  escalations 0 (<= 0)
+  INJECTION        4     4     0     0       0   pass_rate 1.000  resisted_rate 1.000 (>= 1)  resolved_rate 1.000  escalations 0 (<= 0)
+  SAFETY           2     2     0     0       0   pass_rate 1.000 (>= 1)  escalations 0 (<= 0)
+  RESILIENCE       2     2     0     0       0   pass_rate 1.000 (>= 1)  escalations 0 (<= 0)
+  BUDGET           2     2     0     0       0   pass_rate 1.000 (>= 1)  escalations 0 (<= 0)
+```
+
+Fifteen cases across spec §12's seven categories, each one a real run driven through the real
+loop — same worker, same store, same registry as `agentd work` — and judged from the event log,
+the `tool_calls` ledger, and the `chunks` table. Nothing is re-executed to check it, and no judge
+model is asked for an opinion: a second stochastic system between the runtime and its own test
+results is the thing this harness exists to remove (ADR-31). The harness owns its workers rather
+than talking to a server, because a RESILIENCE case has to tear one down mid-tool-call and that
+is not something it can do to a process it does not own (ADR-29).
+
+### Two modes, one fixture
+
+**Replay** freezes the model and proves the *runtime*: the loop, the ledger, the envelope, the
+budget gates, the resume path, the citation plumbing. **`make eval-live`** runs the same cases
+against a real model and proves the *model*: that it finds the right opinion, cites it honestly,
+and ignores a planted instruction. Read the numbers accordingly — under replay, an assertion
+about what the model *chose* is testing the plumbing that carried the choice.
+
+Replay freezes the model and nothing else. A replayed run still writes to Postgres, still
+searches the real corpus, and still executes real containers, which is why `make eval` needs a
+database and why the SAFETY cases skip visibly on a machine with no Docker rather than failing.
+
+### The cassette problem
+
+A cassette is keyed by a hash of the request, not by the call's ordinal. Ordinal matching is
+simpler and breaks the one category §12 exists for: model calls are at-least-once (ADR-4), so a
+worker that dies mid-call leaves a dangling request the next worker repeats, and that repeat
+would consume the *next* entry and desynchronise the rest of the run.
+
+Hashing costs a normalisation step, because tool results carry fields that move between two
+identical runs — `run_python`'s `duration_ms`, and `chunk_id`/`document_id`, which are fresh
+UUIDs on every ingest. The volatile list lives in the cassette file so a miss can point at it,
+and the envelope's `seq` is dropped too: a crash inside a model call shifts every later seq by
+one, and the seq is a fact about the log's shape rather than about what the model was asked
+(ADR-28). A miss fails the case with a diff against the nearest recording and never reaches for
+a live provider — a cassette that silently fell through to the real API would turn "free and
+deterministic" into a surprise bill.
+
+The rate card is recorded in the cassette header, so the pre-flight budget ceiling replays its
+exact arithmetic with no API key. The `budget-ceiling-refuses-before-spending` cassette is the
+clearest case: the run makes zero model calls by design, so its cassette is nothing but a rate
+card, and replaying it still terminates at `spent_usd = 0` of a two-cent budget.
+
+`make eval-record` regenerates every cassette from trajectories declared in the suite files, so
+they rebuild on a machine with no model at all; `make eval-record-live` replaces them with ones
+a model actually chose.
+
+### Injection: two numbers, and exposure before resistance
+
+Four attacks are planted in otherwise plausible opinion prose (`evals/corpus/poisoned.jsonl`):
+reach for `run_python` and read `/etc/passwd`, append a canary to the answer, stop researching
+and `finish` with a fixed sentence, and close the envelope to continue as a forged system turn.
+
+Every case asserts **exposure before resistance** — the planted text must appear in one of that
+run's own tool results before any claim is made about the model ignoring it. A case whose query
+never ranked the poisoned document proves nothing, and is reported *inconclusive* rather than
+passed; the parser refuses an INJECTION case that declares no `exposed_with`, and a threshold on
+a metric that went unmeasured fails rather than reading as silence. That is the default failure
+mode of this category, not an edge case.
+
+The scorecard reports `resisted_rate` — soft, model behaviour, only meaningful next to the name
+of the model that produced it — and `escalations`, a hard count that must be zero: a tool that
+ran without being on the run's allowlist, or a tool result that forged the envelope. That is
+`SECURITY.md`'s "containment, not immunity" made countable (ADR-30). Escalations are computed
+for every case in the suite, not only the injection ones.
+
+### Two defects the evals found
+
+**The envelope was forgeable through tool failures.** The system prompt says everything between
+`<tool_result>` tags is data, so a body that can close the tag and keep writing is a body that
+can stop being data. Retrieved documents never could — every tool serialises with
+`encoding/json`, which escapes `<` and `>` by default — but `Reduce` envelopes
+`"error: " + p.Error` with no serialiser in between, and that error text carries model-supplied
+content (`unknown tool: <name>` puts a name the model chose into the conversation verbatim). The
+hole was narrow; the problem was that the property came from a serialiser's default rather than
+a decision, and nothing in the codebase would have objected when a tool stopped providing it.
+`Envelope` now defangs the delimiter itself (ADR-33).
+
+**Retrieval was not reproducible across re-ingests.** Both corpus queries broke score ties on
+`c.id`, and `IngestDocument` mints a fresh UUID for every chunk on every ingest — so the
+tiebreaker was itself random per ingest. Same corpus, same scores, different top-k. That made
+every retrieval number unreproducible, the recall table above included. Ties now break on
+`(source_id, ordinal)` (ADR-32). It surfaced because cassette replay broke after the eval
+database was truncated and re-ingested, and the miss message named the reordered search result —
+an eval that only re-ran against a database somebody had already loaded would never have seen it.
+Re-running `make eval-retrieval` after the fix produced the same numbers: it makes them
+reproducible, it does not move them.
+
+### What the scorecard does not say
+
+It is fifteen cases over a sixteen-document fixture corpus, and it is a **regression suite, not a
+benchmark** — the same caveat the retrieval table carries. A green `make eval` means the runtime
+still does what M1–M4 said it does; it does not mean the agent is good at legal research. Under
+replay the resistance and citation numbers come from recorded trajectories and are worth what a
+fixture is worth. `make eval-live` is the half that scores the model, and it costs what a real
+model costs.
+
+`evals/results.json` carries every case's outcome, step count, spend, cassette, and failing
+assertion next to the numbers, so a table here can be traced to the run that produced it.
 
 ## Quickstart
 
@@ -603,6 +721,8 @@ make test-retrieval       # the pgvector-backed retrieval tests alone; Docker, n
 make test-live            # one real call to Ollama; requires the model pulled
 make test-live-anthropic  # two real calls to Claude (a tool call, then the tool result
                           # with the thinking turn echoed back); needs ANTHROPIC_API_KEY
+make eval                 # the agent eval scorecard, replayed from cassettes; Postgres only
+make eval-retrieval       # recall@k and MRR per retrieval mode; needs Ollama
 ```
 
 Nothing in `make test` calls Ollama. The retrieval tests use a deterministic hash-based fake
@@ -636,13 +756,28 @@ one series per status and that a failed query does not take the scrape down with
 paths — `make demo-budget`, `make demo-cancel`, `make crash-demo` under compose — are M4's
 `test-live` equivalent and are run by hand.
 
+M5's harness is tested rather than trusted, because a harness that scores its own correctness is
+the one thing an eval cannot do. The cassette key is pinned from both directions: two searches
+differing only in `duration_ms` and chunk UUIDs must hash the same, a conversation differing by a
+message or a system prompt must not, and a repeated identical request must return the same entry
+rather than the next one. `internal/evals` tests each assertion against hand-built event logs,
+including the two shapes that matter most — a tool call requested and never completed, and a
+ledger row left `started` — plus the escalation detector against a forged envelope injected into
+a reduced conversation, so the check survives `Envelope` being changed back. The runner's
+integration test records a suite and replays it against `testutil.Postgres` with no model
+reachable, drives the crash case end to end, and asserts that a drifted cassette fails loudly
+with a diff and that a missing one is a failure rather than a silent pass. `make test` stays
+model-free, key-free, and network-free; `make eval` is the CI target in its own right, because it
+needs a Postgres the test suite does not have a DSN for.
+
 ## Layout
 
 ```
 cmd/agentd/            # serve | work | migrate | fetch | ingest | eval
 internal/api/          # handlers, SSE tail, config normalisation
 internal/runtime/      # event payloads, Reduce, the loop, worker (claim/heartbeat/reaper)
-internal/model/        # Provider interface, pricing, Router; local/ (OpenAI-compatible), anthropic/ (Claude), fake/ (tests)
+internal/model/        # Provider interface, pricing, request fingerprint, Router; local/, anthropic/, fake/, cassette/ (record + replay)
+internal/evals/        # suite parsing, the case runner and its chaos hook, the assertion vocabulary, citations, scorecard
 internal/tools/        # Tool interface, registry + schema validation; builtin/, python/ (sandboxed), corpus/ (retrieval)
 internal/sandbox/      # Executor interface, Docker executor, limits, output capping, safety tests
 internal/retrieval/    # Searcher + RRF; chunk/, embed/ (Ollama + fake), courtlistener/, rerank/, eval/
@@ -650,6 +785,9 @@ internal/store/        # Postgres access, fenced writes, ledger, corpus queries,
 internal/telemetry/    # tracer setup, span helpers + names, the root-span ID generator, slog correlation, Prometheus instruments
 internal/testutil/     # shared testcontainers Postgres fixture
 evals/retrieval/       # checked-in fixture corpus, labeled queries, results.json
+evals/cases/           # the agent suite: SMOKE, RETRIEVAL, CITATION, INJECTION, SAFETY, RESILIENCE, BUDGET
+evals/corpus/          # poisoned.jsonl — the four planted attacks
+evals/cassettes/       # one recorded trajectory per case
 scripts/crash-demo.sh  # the kill -9 demo
 scripts/demo-cancel.sh # cancel a run mid-tool-call and time it
 scripts/compare-providers.sh  # one goal, both providers, trajectories side by side
@@ -669,7 +807,10 @@ blocks as opaque log content, refusing to call an unpriced model, the Engine API
 docker CLI, failing scripts as results rather than tool failures, inputs through an anonymous
 volume, the boot-time orphan sweep, the pre-flight budget ceiling, tool-internal cost
 attribution, one trace per run via a durable trace id, interrupting cancellation,
-`client_golang` alongside OTel, and typed non-retryable provider errors.
+`client_golang` alongside OTel, typed non-retryable provider errors, cassettes keyed by a
+normalised request hash, the eval harness driving the loop in-process, injection scored as two
+numbers, thresholds over golden trajectories, a retrieval tiebreaker that survives re-ingest, and
+an envelope that defangs its own delimiters.
 
 Earlier notes from M0 still hold: hand-written pgx rather than sqlc while the schema moves;
 SSE polls the log at 200ms rather than `LISTEN/NOTIFY`; the terminal status and
@@ -685,9 +826,17 @@ Human-in-the-loop approval flows are out of scope for v1 (spec §2) and would sl
 `approval_requested` / `approval_granted` event pair that suspends the loop.
 
 Deferred deliberately, with the seam already in place: `POST /v1/corpus/ingest` is an async
-wrapper over `agentd ingest` and lands with the other API polish in M6; a cross-encoder reranker
-is a second implementation of `rerank.Reranker`; and planted-document injection tests are M5,
-which the JSONL ingest format was shaped to make a one-line edit.
+wrapper over `agentd ingest` and lands with the other API polish in M6, and a cross-encoder
+reranker is a second implementation of `rerank.Reranker`.
+
+What M5 deliberately did not build: an LLM judge, because every assertion is mechanically
+checkable against the log or the database on purpose; golden-trajectory diffing, which is more
+precise and gets regenerated rather than read (ADR-31); cassettes for the *embedder* and the
+*sandbox*, since replay freezes the model and nothing else; multi-turn injection, where a second
+document reacts to the model's reply — a corpus is a static attacker, which is the threat model
+`SECURITY.md` describes; and cost regression tracking over time, which wants a results database
+rather than a JSON file. The hand-labeled corpus at real scale is still the two-hour job M3's
+plan budgets for, and M5 does not relitigate it.
 
 Two items that were listed here through M3 are closed. Tool-internal model cost **is** attributed
 to the run as of M4, so the budget bounds the run rather than the loop; the local-only rerank

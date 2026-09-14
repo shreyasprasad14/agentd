@@ -200,8 +200,50 @@ func (s *Store) ListChunks(ctx context.Context, docID uuid.UUID, from, to int) (
 	return out, rows.Err()
 }
 
+// GetChunkByCitation resolves a (source_id, ordinal) pair — the citation
+// format the corpus tools hand the model and the system prompt asks for — to
+// the chunk it names, or ErrNotFound.
+//
+// It exists as one query rather than GetDocumentBySourceID followed by
+// ListChunks because the M5 CITATION eval calls it once per citation in an
+// answer, and a fabricated citation is exactly the case where the first half
+// of that pair would have succeeded and told the caller nothing.
+func (s *Store) GetChunkByCitation(ctx context.Context, sourceID string, ordinal int) (*SearchHit, error) {
+	row := s.pool.QueryRow(ctx, `
+		SELECT `+hitColumns+`
+		FROM chunks c JOIN documents d ON d.id = c.document_id
+		WHERE d.source_id = $1 AND c.ordinal = $2`, sourceID, ordinal)
+	var h SearchHit
+	err := row.Scan(&h.ChunkID, &h.DocumentID, &h.SourceID, &h.Title, &h.Court,
+		&h.DecidedOn, &h.Section, &h.Ordinal, &h.Content)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &h, nil
+}
+
 const hitColumns = `c.id, c.document_id, d.source_id, COALESCE(d.title, ''), COALESCE(d.court, ''),
 	d.decided_on, COALESCE(c.section, ''), c.ordinal, c.content`
+
+// stableTiebreak orders chunks that score identically by their citation
+// coordinates, which are a property of the corpus text.
+//
+// Both search queries used to break ties on c.id, and that was wrong in a way
+// only an eval could catch: IngestDocument mints a fresh uuid.New() for every
+// chunk on every ingest, so the tiebreaker was itself random per ingest. Two
+// ingests of the same file gave the same scores and a different order, and
+// with a small corpus there are real ties — a bag-of-words or an embedding
+// query matches many chunks equally — so the top-k changed. That made every
+// retrieval number unreproducible across re-ingests, including the recall@k
+// table in the README, and it broke cassette replay outright, which is how it
+// was found (M5).
+//
+// (source_id, ordinal) is the pair the corpus tools already hand the model to
+// cite with, and the schema makes it unique per chunk.
+const stableTiebreak = `, d.source_id, c.ordinal`
 
 // filterSQL renders the optional corpus filters as extra AND clauses, using
 // placeholders starting after n existing arguments.
@@ -257,7 +299,7 @@ func (s *Store) SearchVector(ctx context.Context, embedding []float32, limit int
 		SELECT `+hitColumns+`
 		FROM chunks c JOIN documents d ON d.id = c.document_id
 		WHERE c.embedding IS NOT NULL`+where+`
-		ORDER BY c.embedding <=> $1::vector, c.id
+		ORDER BY c.embedding <=> $1::vector`+stableTiebreak+`
 		LIMIT $2`, args...)
 	if err != nil {
 		return nil, err
@@ -298,7 +340,7 @@ func (s *Store) SearchLexical(ctx context.Context, query string, limit int, f Co
 		FROM chunks c JOIN documents d ON d.id = c.document_id,
 		     LATERAL (SELECT `+lexicalQuerySQL+` AS q) tq
 		WHERE tq.q IS NOT NULL AND c.tsv @@ tq.q`+where+`
-		ORDER BY ts_rank_cd(c.tsv, tq.q) DESC, c.id
+		ORDER BY ts_rank_cd(c.tsv, tq.q) DESC`+stableTiebreak+`
 		LIMIT $2`, args...)
 	if err != nil {
 		return nil, err

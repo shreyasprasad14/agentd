@@ -1,5 +1,10 @@
 COMPOSE := docker compose -f deploy/docker-compose.yml
 DSN ?= postgres://agentd:agentd@localhost:5432/agentd?sslmode=disable
+## EVAL_DSN is a database of its own. The agent eval suite embeds with a
+## deterministic fake embedder, and its corpus includes planted documents that
+## say "disregard your instructions" — neither belongs in the database the
+## demos search. It is created on first use.
+EVAL_DSN ?= postgres://agentd:agentd@localhost:5432/agentd_eval?sslmode=disable
 MODEL ?= qwen2.5:7b
 MODEL_URL ?= http://localhost:11434/v1
 EMBED_MODEL ?= mxbai-embed-large
@@ -12,7 +17,7 @@ CORPUS ?= data/corpus/$(COURT).jsonl
 JAEGER_UI ?= http://localhost:16686
 PROMETHEUS_UI ?= http://localhost:9090
 
-.PHONY: build test test-short test-sandbox test-retrieval test-live test-live-anthropic up down logs migrate serve work demo demo-anthropic demo-python demo-legal demo-budget demo-cancel compare crash-demo trace metrics model-pull sandbox-build fetch-corpus ingest ingest-fixture eval-retrieval fmt vet
+.PHONY: build test test-short test-sandbox test-retrieval test-live test-live-anthropic up down logs migrate serve work demo demo-anthropic demo-python demo-legal demo-budget demo-cancel compare crash-demo trace metrics model-pull sandbox-build fetch-corpus ingest ingest-fixture eval eval-record eval-live eval-record-live eval-retrieval fmt vet
 
 build:
 	go build ./...
@@ -94,6 +99,33 @@ ingest-fixture:
 ## and exits nonzero below the thresholds in labels.yaml.
 eval-retrieval:
 	go run ./cmd/agentd eval retrieval -dsn "$(DSN)" -model-url "$(MODEL_URL)" -embed-model $(EMBED_MODEL)
+
+## eval replays the checked-in cassettes through the real loop and prints the
+## scorecard. No model, no API key, no network: Postgres is the only
+## dependency, and the Docker-dependent SAFETY cases skip visibly without a
+## daemon. This is the CI target.
+eval:
+	go run ./cmd/agentd eval suite -dsn "$(EVAL_DSN)"
+
+## eval-record regenerates every cassette from the trajectories declared in
+## evals/cases/*.yaml. Needs no model either — the scripts are the source and
+## the cassettes are the artifact.
+eval-record:
+	go run ./cmd/agentd eval record -dsn "$(EVAL_DSN)"
+
+## eval-live runs the same cases against a real model, which is the half of
+## §12 that scores the model rather than the runtime. Set MODEL, or
+## MODEL=anthropic/$(ANTHROPIC_MODEL) with ANTHROPIC_API_KEY set.
+eval-live:
+	go run ./cmd/agentd eval suite -dsn "$(EVAL_DSN)" -live -model "$(MODEL)" -model-url "$(MODEL_URL)" \
+		-embedder $(EMBED_MODEL)
+
+## eval-record-live re-records the cassettes from a real model, replacing the
+## scripted trajectories with ones a model actually chose. Costs whatever the
+## suite costs against MODEL.
+eval-record-live:
+	go run ./cmd/agentd eval record -dsn "$(EVAL_DSN)" -from model -model "$(MODEL)" -model-url "$(MODEL_URL)" \
+		-embedder $(EMBED_MODEL)
 
 ## demo submits a run against a locally running API and tails its SSE stream.
 demo:
