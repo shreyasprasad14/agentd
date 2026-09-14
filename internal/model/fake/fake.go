@@ -14,11 +14,12 @@ import (
 
 // Provider is a scripted model.
 type Provider struct {
-	mu        sync.Mutex
-	name      string
-	responses []*model.Response
-	requests  []model.Request
-	price     model.Price
+	mu              sync.Mutex
+	name            string
+	responses       []*model.Response
+	requests        []model.Request
+	price           model.Price
+	maxOutputTokens int
 	// OnComplete, if set, is called before each response is returned. Tests
 	// use it to block or to fail a call.
 	OnComplete func(ctx context.Context, req model.Request, n int) error
@@ -34,6 +35,14 @@ func New(responses ...*model.Response) *Provider {
 // WithPrice sets nonzero pricing so budget enforcement can be exercised.
 func (p *Provider) WithPrice(price model.Price) *Provider {
 	p.price = price
+	return p
+}
+
+// WithMaxOutputTokens sets the cap MaxOutputTokens reports. Together with
+// WithPrice it is what lets a test put the loop's pre-flight budget estimate
+// on either side of a run's budget without a hosted model (ADR-22).
+func (p *Provider) WithMaxOutputTokens(n int) *Provider {
+	p.maxOutputTokens = n
 	return p
 }
 
@@ -81,6 +90,11 @@ func (p *Provider) Complete(ctx context.Context, req model.Request) (*model.Resp
 
 // CostMicroUSD implements model.Provider.
 func (p *Provider) CostMicroUSD(_ string, u model.Usage) int64 { return p.price.Cost(u) }
+
+// MaxOutputTokens implements model.Provider. Zero unless WithMaxOutputTokens
+// said otherwise, matching the local provider, which is the default a test
+// that does not care about budgets wants.
+func (p *Provider) MaxOutputTokens(string) int { return p.maxOutputTokens }
 
 // Requests returns a copy of every request seen so far.
 func (p *Provider) Requests() []model.Request {

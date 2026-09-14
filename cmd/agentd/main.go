@@ -15,6 +15,8 @@ import (
 	"syscall"
 	"time"
 
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/shreyasprasad/agentd/internal/api"
 	"github.com/shreyasprasad/agentd/internal/model"
 	"github.com/shreyasprasad/agentd/internal/model/anthropic"
@@ -23,6 +25,7 @@ import (
 	"github.com/shreyasprasad/agentd/internal/runtime"
 	"github.com/shreyasprasad/agentd/internal/sandbox"
 	"github.com/shreyasprasad/agentd/internal/store"
+	"github.com/shreyasprasad/agentd/internal/telemetry"
 	"github.com/shreyasprasad/agentd/internal/tools"
 	"github.com/shreyasprasad/agentd/internal/tools/builtin"
 	"github.com/shreyasprasad/agentd/internal/tools/corpus"
@@ -65,6 +68,8 @@ func run() error {
 		return ingestCmd(ctx, os.Args[2:])
 	case "eval":
 		return evalCmd(ctx, os.Args[2:])
+	case "healthz":
+		return healthCmd(ctx, os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 		return nil
@@ -84,6 +89,7 @@ commands:
   fetch     pull court opinions from CourtListener into a JSONL corpus file
   ingest    chunk, embed, and upsert a fetched corpus into Postgres
   eval      run an eval suite (eval retrieval)
+  healthz   probe a serve or work process's /healthz and exit 0 or 1
 
 `)
 }
@@ -102,19 +108,36 @@ func serve(ctx context.Context, args []string) error {
 	addr := fs.String("addr", envOr("AGENTD_ADDR", ":8080"), "listen address")
 	dsn := fs.String("dsn", envOr("AGENTD_DSN", defaultDSN), "Postgres DSN")
 	poll := fs.Duration("sse-poll", 200*time.Millisecond, "SSE event tail poll interval")
+	jaegerUI := fs.String("jaeger-ui", envOr("AGENTD_JAEGER_UI", api.DefaultJaegerUI),
+		"browser-facing Jaeger base URL that GET /v1/runs/:id/trace links into")
+	tf := addTraceFlags(fs, "agentd-api")
 	skipMigrate := fs.Bool("skip-migrate", false, "do not apply migrations at startup")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
 	log := newLogger("serve")
+	tel, err := tf.start(ctx, log)
+	if err != nil {
+		return err
+	}
+	defer stopTracing(tel, log)
+
 	st, err := open(ctx, *dsn, log, !*skipMigrate)
 	if err != nil {
 		return err
 	}
 	defer st.Close()
 
-	srv := api.NewServer(st, log, api.Options{PollInterval: *poll, Registry: registry(nil, sandbox.DefaultLimits(), nil, nil)})
+	// The API serves /metrics on its own listener, and NewServer registers
+	// the Postgres-backed run gauges against this registry (ADR-26).
+	srv := api.NewServer(st, log, api.Options{
+		PollInterval: *poll,
+		Registry:     registry(nil, sandbox.DefaultLimits(), nil, nil),
+		Tracer:       tel.Tracer(),
+		JaegerUI:     *jaegerUI,
+		Metrics:      telemetry.NewMetrics(),
+	})
 	return srv.ListenAndServe(ctx, *addr)
 }
 
@@ -136,19 +159,40 @@ func work(ctx context.Context, args []string) error {
 	sandboxImage := fs.String("sandbox-image", envOr("AGENTD_SANDBOX_IMAGE", defaultSandboxImage), "container image for sandboxed tools (build with `make sandbox-build`)")
 	sandboxTimeout := fs.Duration("sandbox-timeout", envDurationOr("AGENTD_SANDBOX_TIMEOUT", sandbox.DefaultLimits().DefaultTimeout), "default wall-clock limit per sandboxed tool call")
 	sandboxMaxTimeout := fs.Duration("sandbox-max-timeout", envDurationOr("AGENTD_SANDBOX_MAX_TIMEOUT", sandbox.DefaultLimits().MaxTimeout), "the most a tool call may ask for via timeout_seconds")
+	cancelPoll := fs.Duration("cancel-poll", envDurationOr("AGENTD_CANCEL_POLL", runtime.DefaultCancelPoll),
+		"how often a running run's cancel flag is checked; the floor on cancel latency (ADR-25)")
 	ef := addEmbedFlags(fs)
 	rf := addRerankFlags(fs)
+	tf := addTraceFlags(fs, "agentd-worker")
+	metricsAddr := addMetricsAddrFlag(fs)
 	skipMigrate := fs.Bool("skip-migrate", false, "do not apply migrations at startup")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
 	log := newLogger("work")
+	// One registry for this process, injected into everything that counts:
+	// the loop and the worker through WorkerConfig, the sandbox and the
+	// searcher through their own configs. No package-level instruments, so
+	// two workers in one test process cannot fight over a registration.
+	metrics := telemetry.NewMetrics()
+	stopMetrics := serveMetrics(*metricsAddr, metrics, log)
+	defer stopMetrics()
+	// Before anything else that can block on a model, a daemon, or Postgres:
+	// the tracer is what the rest of this function is threaded with, and its
+	// startup line belongs above the slow ones an operator waits through.
+	tel, err := tf.start(ctx, log)
+	if err != nil {
+		return err
+	}
+	defer stopTracing(tel, log)
+
 	provider, onBox, err := buildProvider(*modelURL, *modelTimeout, *anthropicPrices, *thinkingDisplay, log)
 	if err != nil {
 		return err
 	}
-	exec, err := buildSandbox(ctx, *sandboxImage, sandbox.Limits{DefaultTimeout: *sandboxTimeout, MaxTimeout: *sandboxMaxTimeout}, log)
+	exec, err := buildSandbox(ctx, *sandboxImage, sandbox.Limits{DefaultTimeout: *sandboxTimeout, MaxTimeout: *sandboxMaxTimeout},
+		log, tel.Tracer(), metrics)
 	if err != nil {
 		return err
 	}
@@ -174,7 +218,7 @@ func work(ctx context.Context, args []string) error {
 
 	searcher := &retrieval.Searcher{
 		Store: st, Embedder: embedder, Reranker: reranker,
-		RerankCandidates: *rf.candidates, Log: log,
+		RerankCandidates: *rf.candidates, Log: log, Tracer: tel.Tracer(), Metrics: metrics,
 	}
 	w := runtime.NewWorker(st, log, runtime.WorkerConfig{
 		Owner:          *owner,
@@ -184,6 +228,9 @@ func work(ctx context.Context, args []string) error {
 		Provider:       provider,
 		Registry:       registry(exec, exec.Limits(), searcher, st),
 		DefaultModel:   *modelName,
+		CancelPoll:     *cancelPoll,
+		Tracer:         tel.Tracer(),
+		Metrics:        metrics,
 	})
 	return w.Run(ctx)
 }
@@ -193,8 +240,9 @@ func work(ctx context.Context, args []string) error {
 // tool must keep working, and the ones that do get a clear tool_failed. When
 // the daemon is reachable, leftovers from a previous worker that died
 // mid-call are swept before any run is claimed.
-func buildSandbox(ctx context.Context, image string, limits sandbox.Limits, log *slog.Logger) (*sandbox.Docker, error) {
-	exec, err := sandbox.NewDocker(sandbox.DockerConfig{Image: image, Limits: limits, Log: log})
+func buildSandbox(ctx context.Context, image string, limits sandbox.Limits, log *slog.Logger,
+	tracer trace.Tracer, metrics *telemetry.Metrics) (*sandbox.Docker, error) {
+	exec, err := sandbox.NewDocker(sandbox.DockerConfig{Image: image, Limits: limits, Log: log, Tracer: tracer, Metrics: metrics})
 	if err != nil {
 		return nil, err
 	}
@@ -295,12 +343,19 @@ func open(ctx context.Context, dsn string, log *slog.Logger, doMigrate bool) (*s
 	}
 }
 
+// newLogger builds the process logger. Every line goes through
+// telemetry.NewHandler, which adds trace_id and span_id when the context a
+// line was logged with carries a span, so a log line and a bar of the
+// waterfall can be matched up. It wraps unconditionally: the wrapper adds
+// nothing to a line that has no span, so the commands that never trace —
+// migrate, fetch, ingest, eval — pay a context lookup and print what they
+// always printed.
 func newLogger(mode string) *slog.Logger {
 	level := slog.LevelInfo
 	if os.Getenv("AGENTD_DEBUG") != "" {
 		level = slog.LevelDebug
 	}
-	h := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})
+	h := telemetry.NewHandler(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
 	log := slog.New(h).With("mode", mode)
 	slog.SetDefault(log)
 	return log

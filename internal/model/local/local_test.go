@@ -3,8 +3,10 @@ package local
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -118,6 +120,7 @@ func TestCompleteErrors(t *testing.T) {
 	_, err := p.Complete(context.Background(), model.Request{Model: "nope"})
 	require.ErrorContains(t, err, "HTTP 404")
 	require.ErrorContains(t, err, "not found")
+	require.True(t, model.IsNonRetryable(err), "a model that is not installed does not install itself")
 
 	p, _ = serve(t, 200, `{"error":{"message":"overloaded"}}`)
 	_, err = p.Complete(context.Background(), model.Request{Model: "m"})
@@ -130,6 +133,58 @@ func TestCompleteErrors(t *testing.T) {
 	p = New(Config{BaseURL: "http://127.0.0.1:1"})
 	_, err = p.Complete(context.Background(), model.Request{Model: "m"})
 	require.Error(t, err)
+}
+
+// TestCompleteStatusRetryability pins ADR-27's split for a local runtime. The
+// bias differs from the hosted provider's: a runtime that is still loading a
+// model answers with 5xx, a dropped connection, or a truncated body, and the
+// retry is the thing that makes those work.
+func TestCompleteStatusRetryability(t *testing.T) {
+	for _, tc := range []struct {
+		status       int
+		nonRetryable bool
+	}{
+		{400, true},  // a malformed body stays malformed
+		{401, true},  // a rejected key stays rejected
+		{403, true},  //
+		{404, true},  // Ollama's answer for a model that is not pulled
+		{422, true},  //
+		{408, false}, //
+		{429, false}, //
+		{500, false}, //
+		{503, false}, // llama-server while the weights are still loading
+	} {
+		t.Run(strconv.Itoa(tc.status), func(t *testing.T) {
+			p, _ := serve(t, tc.status, `{"error":{"message":"nope"}}`)
+			_, err := p.Complete(context.Background(), model.Request{Model: "m"})
+			require.Error(t, err)
+			require.Equal(t, tc.nonRetryable, model.IsNonRetryable(err))
+			require.ErrorContains(t, err, fmt.Sprintf("HTTP %d", tc.status), "the marker does not rewrite the message")
+		})
+	}
+
+	// Everything that is not a status is retryable, because every one of
+	// these is what a half-started runtime looks like.
+	p, _ := serve(t, 200, `{"choices":[]}`)
+	_, err := p.Complete(context.Background(), model.Request{Model: "m"})
+	require.False(t, model.IsNonRetryable(err), "no choices")
+
+	p, _ = serve(t, 200, `not json`)
+	_, err = p.Complete(context.Background(), model.Request{Model: "m"})
+	require.False(t, model.IsNonRetryable(err), "decode failure")
+
+	p, _ = serve(t, 200, `{"error":{"message":"overloaded"}}`)
+	_, err = p.Complete(context.Background(), model.Request{Model: "m"})
+	require.False(t, model.IsNonRetryable(err), "an in-band error carries no status")
+
+	p = New(Config{BaseURL: "http://127.0.0.1:1"})
+	_, err = p.Complete(context.Background(), model.Request{Model: "m"})
+	require.False(t, model.IsNonRetryable(err), "connection refused")
+}
+
+func TestMaxOutputTokens(t *testing.T) {
+	require.Equal(t, 0, New(Config{}).MaxOutputTokens("qwen2.5:7b"),
+		"the runtime decides its own cap, and local tokens are free either way")
 }
 
 func TestPricing(t *testing.T) {

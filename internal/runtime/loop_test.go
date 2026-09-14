@@ -111,9 +111,16 @@ func TestLoopStepLimit(t *testing.T) {
 	require.Equal(t, int32(2), f.deadline.calls.Load(), "the tool of the last step still runs")
 }
 
+// TestLoopBudgetExceeded is the ceiling rather than the receipt: the run stops
+// before the call it cannot afford, so it terminates with its budget intact
+// instead of with the overrun already on the books (ADR-22). Through M3 this
+// test asserted the opposite — a run that ended 20% past a 1.00 budget — which
+// is the audit this milestone replaced.
 func TestLoopBudgetExceeded(t *testing.T) {
 	// Each call: 100 in @ $5/MTok + 10 out @ $10/MTok = 0.0005 + 0.0001 USD.
-	// Pump the price so one call costs 0.60 USD against a 1.00 budget.
+	// Pump the price so one call costs 0.60 USD against a 1.00 budget, which
+	// also puts the first call's worst case — the whole prompt, tool schemas
+	// included — over the budget on its own.
 	p := fake.New(deadlineCall("t1", 1), deadlineCall("t2", 2), deadlineCall("t3", 3)).
 		WithPrice(model.Price{InputPerMTok: 6_000 * model.MicroUSD, OutputPerMTok: 0})
 	f := newFixture(t, p)
@@ -123,16 +130,25 @@ func TestLoopBudgetExceeded(t *testing.T) {
 	id := f.submit("spend money", runOpts{budget: "1.00"})
 	run := f.waitTerminal(id)
 	require.Equal(t, runtime.StatusBudgetExceeded, run.Status)
-	require.Equal(t, "1.2000", run.SpentUSD)
+	require.Equal(t, "0.0000", run.SpentUSD, "refused before the money was spent")
+	require.Equal(t, 0, f.provider.Calls(), "the refused call never reached the provider")
 
 	evs := f.events(id)
-	types := eventTypes(evs)
-	require.Equal(t, runtime.EventBudgetExceeded, types[len(types)-2])
-	require.Equal(t, runtime.EventRunFinished, types[len(types)-1])
-	be := decode[runtime.BudgetExceededPayload](t, evs[len(evs)-2])
-	require.Equal(t, int64(1_200_000), be.SpentMicroUSD)
+	require.Equal(t, []string{
+		runtime.EventRunStarted, runtime.EventBudgetExceeded, runtime.EventRunFinished,
+	}, eventTypes(evs))
+
+	be := decode[runtime.BudgetExceededPayload](t, evs[1])
+	require.Equal(t, runtime.BudgetReasonWouldExceed, be.Reason)
+	require.Equal(t, int64(0), be.SpentMicroUSD)
 	require.Equal(t, int64(1_000_000), be.BudgetMicroUSD)
-	require.Equal(t, 2, f.provider.Calls())
+	require.Greater(t, be.EstimateMicroUSD, be.BudgetMicroUSD, "the refused call is priced above the whole budget")
+	// A refusal has to be arguable, so the payload carries the arithmetic
+	// rather than a verdict: at 6_000 µUSD per input token and nothing for
+	// output, the token count it reports reproduces the price it quotes.
+	require.Equal(t, be.EstimatedInputTokens*6_000, be.EstimateMicroUSD)
+	require.Zero(t, be.MaxOutputTokens, "the fake names no cap, so the estimate stands on its input term")
+	require.Contains(t, f.state(id).Error, "next call estimated at")
 }
 
 func TestLoopToolRejectionsGoBackToTheModel(t *testing.T) {

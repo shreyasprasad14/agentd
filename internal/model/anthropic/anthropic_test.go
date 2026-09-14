@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync/atomic"
 	"testing"
 
@@ -172,10 +174,11 @@ func TestCompleteRefusalIsAnError(t *testing.T) {
 		"usage":{"input_tokens":1,"output_tokens":0}}`, Config{})
 	_, err := p.Complete(context.Background(), model.Request{Model: "claude-opus-5"})
 	var refusal *RefusalError
-	require.ErrorAs(t, err, &refusal)
+	require.ErrorAs(t, err, &refusal, "the typed error survives the non-retryable marker")
 	require.Equal(t, "cyber", refusal.Category)
 	require.Equal(t, "nope", refusal.Explanation)
 	require.ErrorContains(t, err, "refused")
+	require.True(t, model.IsNonRetryable(err), "the model declined the request, not this attempt at it")
 }
 
 func TestCompleteErrors(t *testing.T) {
@@ -185,11 +188,13 @@ func TestCompleteErrors(t *testing.T) {
 	require.ErrorContains(t, err, "authentication_error")
 	require.ErrorContains(t, err, "invalid x-api-key")
 	require.Equal(t, int32(1), calls.Load(), "4xx is not retried")
+	require.True(t, model.IsNonRetryable(err), "a bad credential never starts working")
 
 	p, _, calls = serve(t, 200, `{}`, Config{})
 	_, err = p.Complete(context.Background(), model.Request{Model: "claude-unpriced-9"})
 	require.ErrorContains(t, err, "no price configured")
 	require.Equal(t, int32(0), calls.Load(), "refused before any request is made")
+	require.True(t, model.IsNonRetryable(err), "a missing price is configuration, not weather")
 
 	_, err = p.Complete(context.Background(), model.Request{})
 	require.ErrorContains(t, err, "model is required")
@@ -207,6 +212,45 @@ func TestCompleteErrors(t *testing.T) {
 	require.Error(t, err)
 	var apiErr *RefusalError
 	require.False(t, errors.As(err, &apiErr))
+	require.False(t, model.IsNonRetryable(err), "a transport failure has no status to judge, so it is retried")
+}
+
+// TestCompleteStatusRetryability pins the split ADR-27 draws: the statuses
+// that describe the request are fatal, the ones that describe the moment are
+// not. The error text is unchanged either way — only how the loop treats it.
+func TestCompleteStatusRetryability(t *testing.T) {
+	const body = `{"type":"error","error":{"type":"invalid_request_error","message":"nope"}}`
+	for _, tc := range []struct {
+		status       int
+		nonRetryable bool
+	}{
+		{400, true},  // a malformed body stays malformed
+		{401, true},  // a bad credential never starts working
+		{403, true},  // a forbidden caller stays forbidden
+		{404, true},  // an unknown model stays unknown
+		{422, true},  // an unprocessable request stays unprocessable
+		{408, false}, // a timeout deserves backoff
+		{409, false},
+		{429, false}, // a rate limit is exactly what a retry is for
+		{500, false},
+		{529, false}, // overloaded
+	} {
+		t.Run(strconv.Itoa(tc.status), func(t *testing.T) {
+			p, _, calls := serve(t, tc.status, body, Config{})
+			_, err := p.Complete(context.Background(), model.Request{Model: "claude-opus-5"})
+			require.Error(t, err)
+			require.Equal(t, tc.nonRetryable, model.IsNonRetryable(err))
+			require.ErrorContains(t, err, fmt.Sprintf("HTTP %d", tc.status), "the marker does not rewrite the message")
+			require.Equal(t, int32(1), calls.Load(), "SDK retries are off in this fixture")
+		})
+	}
+}
+
+func TestMaxOutputTokens(t *testing.T) {
+	p := New(Config{APIKey: "k"})
+	require.Equal(t, DefaultMaxTokens, p.MaxOutputTokens("claude-opus-5"))
+	require.Equal(t, DefaultMaxTokens, p.MaxOutputTokens("claude-haiku-4-5"),
+		"the cap is the provider's substitute for an absent max_tokens, so it does not vary by model")
 }
 
 func TestPricingTable(t *testing.T) {
@@ -251,4 +295,38 @@ func TestParsePrices(t *testing.T) {
 		_, err := ParsePrices(bad)
 		require.Error(t, err, bad)
 	}
+}
+
+// TestCompleteMalformedRequestsAreNonRetryable covers the failures that happen
+// before the request is ever sent. They are the clearest case ADR-27 exists
+// for: nothing about the network decided them, so the two backoffs the loop
+// would otherwise spend buy a strictly identical answer.
+func TestCompleteMalformedRequestsAreNonRetryable(t *testing.T) {
+	p, _, calls := serve(t, 200, `{}`, Config{})
+
+	t.Run("no model", func(t *testing.T) {
+		_, err := p.Complete(context.Background(), model.Request{})
+		require.ErrorContains(t, err, "model is required")
+		require.True(t, model.IsNonRetryable(err))
+	})
+
+	t.Run("unknown role", func(t *testing.T) {
+		_, err := p.Complete(context.Background(), model.Request{
+			Model:    "claude-opus-5",
+			Messages: []model.Message{{Role: "system", Content: []model.ContentBlock{{Type: model.BlockText, Text: "hi"}}}},
+		})
+		require.ErrorContains(t, err, `unknown role "system"`)
+		require.True(t, model.IsNonRetryable(err))
+	})
+
+	t.Run("bad tool schema", func(t *testing.T) {
+		_, err := p.Complete(context.Background(), model.Request{
+			Model: "claude-opus-5",
+			Tools: []model.ToolDef{{Name: "broken", InputSchema: json.RawMessage(`"not an object"`)}},
+		})
+		require.ErrorContains(t, err, "input schema")
+		require.True(t, model.IsNonRetryable(err))
+	})
+
+	require.Zero(t, calls.Load(), "none of these reached the API at all")
 }

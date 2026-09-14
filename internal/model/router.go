@@ -82,6 +82,25 @@ func (r *Router) Backends() []string {
 // Response.Provider, which is what the event log records.
 func (r *Router) Name() string { return "router" }
 
+// Backend names the provider that will serve model, and the model name that
+// provider will be handed. It is what a caller labelling a metric wants: a
+// composite provider's own Name is "router", which would put every hosted and
+// local call in one series, and Response.Provider only exists once a call has
+// succeeded — so a failed attempt would be filed under a different provider
+// than a successful one.
+//
+// An unroutable model reports the composite's name and the name as given.
+// The Complete call for it is about to fail with the routing error, and the
+// metric should say which model nobody could serve.
+func Backend(p Provider, name string) (provider, model string) {
+	if r, ok := p.(*Router); ok {
+		if backend, _, backendModel, err := r.Resolve(name); err == nil {
+			return backend, backendModel
+		}
+	}
+	return p.Name(), name
+}
+
 // Resolve returns the backend for model and the model name to hand it.
 func (r *Router) Resolve(model string) (name string, p Provider, backendModel string, err error) {
 	r.mu.RLock()
@@ -135,4 +154,17 @@ func (r *Router) CostMicroUSD(model string, u Usage) int64 {
 		return 0
 	}
 	return p.CostMicroUSD(backendModel, u)
+}
+
+// MaxOutputTokens implements Provider by asking the backend that would serve
+// the model, so the loop's pre-flight estimate uses the cap the call will
+// actually run under rather than the composite's guess. An unroutable model
+// reports zero for the same reason it prices at zero: the Complete call for it
+// is about to fail, so there is no call to bound.
+func (r *Router) MaxOutputTokens(model string) int {
+	_, p, backendModel, err := r.Resolve(model)
+	if err != nil {
+		return 0
+	}
+	return p.MaxOutputTokens(backendModel)
 }

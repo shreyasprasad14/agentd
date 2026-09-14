@@ -16,6 +16,10 @@ import (
 	"github.com/moby/moby/api/types/mount"
 	"github.com/moby/moby/api/types/network"
 	"github.com/moby/moby/client"
+	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
+
+	"github.com/shreyasprasad/agentd/internal/telemetry"
 )
 
 // sandboxUser is the unprivileged uid:gid every container runs as (nobody).
@@ -31,16 +35,24 @@ type DockerConfig struct {
 	// DOCKER_HOST, then the current CLI context, then the default socket.
 	Host string
 	Log  *slog.Logger
+	// Tracer draws one sandbox.exec span per Run, under whichever tool asked
+	// for the container. Nil is fine and means no spans.
+	Tracer trace.Tracer
+	// Metrics counts timeouts and swept orphans. Nil is fine and records
+	// nothing; every method on it is nil-safe.
+	Metrics *telemetry.Metrics
 }
 
 // Docker runs each Spec in a fresh container through the Engine API. It
 // talks to the daemon over the socket, so it works the same whether the
 // worker runs on the host or in a container with the socket mounted.
 type Docker struct {
-	cli    *client.Client
-	image  string
-	limits Limits
-	log    *slog.Logger
+	cli     *client.Client
+	image   string
+	limits  Limits
+	log     *slog.Logger
+	tracer  trace.Tracer
+	metrics *telemetry.Metrics
 }
 
 // NewDocker builds the executor. It does not contact the daemon; call Ping
@@ -61,7 +73,14 @@ func NewDocker(cfg DockerConfig) (*Docker, error) {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Docker{cli: cli, image: cfg.Image, limits: cfg.Limits.withDefaults(), log: log}, nil
+	tracer := cfg.Tracer
+	if tracer == nil {
+		// Resolved once here so Run never asks whether tracing is on: a no-op
+		// tracer hands out spans that cost nothing.
+		tracer = noop.NewTracerProvider().Tracer("")
+	}
+	return &Docker{cli: cli, image: cfg.Image, limits: cfg.Limits.withDefaults(), log: log,
+		tracer: tracer, metrics: cfg.Metrics}, nil
 }
 
 // Host is the daemon address in use.
@@ -88,10 +107,44 @@ func (d *Docker) Ping(ctx context.Context) error {
 }
 
 // Run implements Executor.
+//
+// The span it draws is deliberately not an error span when the script fails:
+// a nonzero exit, a timeout, and an OOM kill are facts about the code the
+// model wrote (ADR-14), so they are attributes on an OK span. Only a sandbox
+// that could not do its job — daemon down, image missing, container refused —
+// ends in error, which keeps "red bar in the waterfall" meaning "the platform
+// is broken" rather than "the model's Python had a typo".
 func (d *Docker) Run(ctx context.Context, spec Spec) (*Output, error) {
+	// Validation is outside the span: a spec rejected before any container
+	// exists has no container lifetime to draw, and the caller's tool.invoke
+	// span already covers it.
 	if err := spec.validate(); err != nil {
 		return nil, err
 	}
+	ctx, span := d.tracer.Start(ctx, telemetry.SpanSandbox,
+		trace.WithAttributes(telemetry.AttrSandboxImage.String(d.image)))
+	out, err := d.run(ctx, spec)
+	if out != nil {
+		span.SetAttributes(
+			telemetry.AttrSandboxExitCode.Int(out.ExitCode),
+			telemetry.AttrSandboxTimedOut.Bool(out.TimedOut),
+			telemetry.AttrSandboxOOM.Bool(out.OOMKilled),
+		)
+		if out.TimedOut {
+			// A timeout is the one sandbox outcome worth its own counter:
+			// it is not a bug in the model's code but a limit the platform
+			// imposed, and a rising rate means -sandbox-timeout is wrong for
+			// the work rather than that the scripts got worse.
+			d.metrics.SandboxTimedOut()
+		}
+	}
+	telemetry.End(span, err)
+	return out, err
+}
+
+// run is Run's body, split out so the span can be ended in one place rather
+// than at each of the half-dozen ways a container can refuse to run.
+func (d *Docker) run(ctx context.Context, spec Spec) (*Output, error) {
 	timeout := d.limits.Timeout(spec.Timeout)
 	withStdin := len(spec.Stdin) > 0
 
@@ -297,6 +350,10 @@ func (d *Docker) SweepOrphans(ctx context.Context, olderThan time.Duration) (int
 			"run_id", c.Labels[LabelRunID], "seq", c.Labels[LabelSeq], "age", time.Since(time.Unix(c.Created, 0)).Round(time.Second))
 		n++
 	}
+	// Counted rather than gauged: a sweep's finding is an event — a worker
+	// died mid-call and left something behind — and the total is what says
+	// how often that has happened since this process started.
+	d.metrics.SandboxOrphansSwept(n)
 	return n, nil
 }
 

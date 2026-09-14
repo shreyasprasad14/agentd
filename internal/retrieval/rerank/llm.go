@@ -44,10 +44,11 @@ Reply with only a JSON object of the form {"scores":[{"id":1,"score":7},{"id":2,
 
 // Rerank implements Reranker. A batch whose completion fails or does not
 // parse scores 0 for every candidate in it and is logged; only context
-// cancellation is returned as an error.
-func (l *LLM) Rerank(ctx context.Context, query string, cands []Candidate) ([]Scored, error) {
+// cancellation is returned as an error. The Usage returned covers every
+// batch the provider answered, whether or not the answer was usable.
+func (l *LLM) Rerank(ctx context.Context, query string, cands []Candidate) ([]Scored, Usage, error) {
 	if len(cands) == 0 {
-		return nil, nil
+		return nil, Usage{}, nil
 	}
 	batchSize := l.BatchSize
 	if batchSize <= 0 {
@@ -63,6 +64,14 @@ func (l *LLM) Rerank(ctx context.Context, query string, cands []Candidate) ([]Sc
 		out[i] = Scored{Index: c.Index}
 	}
 
+	// The running total needs a lock because every batch adds to the same
+	// value; the scores above do not, because each goroutine owns its own
+	// range of out.
+	var (
+		mu    sync.Mutex
+		spent Usage
+	)
+
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, parallel)
 	for start := 0; start < len(cands); start += batchSize {
@@ -76,7 +85,16 @@ func (l *LLM) Rerank(ctx context.Context, query string, cands []Candidate) ([]Sc
 			case <-ctx.Done():
 				return
 			}
-			scores, err := l.scoreBatch(ctx, query, cands[start:end])
+			scores, used, err := l.scoreBatch(ctx, query, cands[start:end])
+			// Count the batch before looking at err. A completion that came
+			// back but whose JSON did not parse still burned its tokens, and
+			// the run was billed for them either way; charging only the
+			// batches that happened to parse would make the reranker look
+			// cheaper the worse it behaved. A batch whose call failed
+			// reports the zero Usage, because there is nothing to report.
+			mu.Lock()
+			spent = spent.Add(used)
+			mu.Unlock()
 			if err != nil {
 				l.log.Warn("rerank batch degraded to fused order", "error", err, "batch_start", start)
 				return
@@ -89,18 +107,22 @@ func (l *LLM) Rerank(ctx context.Context, query string, cands []Candidate) ([]Sc
 	}
 	wg.Wait()
 	if ctx.Err() != nil {
-		return nil, ctx.Err()
+		// Still report the spend: a cancelled pass was billed for whatever
+		// finished before the context went down.
+		return nil, spent, ctx.Err()
 	}
 
 	// Highest score first; ties (including whole failed batches at 0) keep
 	// the caller's fused order because the sort is stable.
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Score > out[j].Score })
-	return out, nil
+	return out, spent, nil
 }
 
 // scoreBatch runs one completion and parses one score per candidate, in
-// candidate order.
-func (l *LLM) scoreBatch(ctx context.Context, query string, cands []Candidate) ([]float64, error) {
+// candidate order. The Usage it returns is what the completion cost, which
+// is non-zero whenever the provider answered at all — including when the
+// answer was unparseable.
+func (l *LLM) scoreBatch(ctx context.Context, query string, cands []Candidate) ([]float64, Usage, error) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Query: %s\n\nPassages:\n", query)
 	for i, c := range cands {
@@ -120,11 +142,20 @@ func (l *LLM) scoreBatch(ctx context.Context, query string, cands []Candidate) (
 		Temperature: &temp,
 	})
 	if err != nil {
-		return nil, err
+		return nil, Usage{}, err
+	}
+	// Only the uncached prompt tokens go in InputTokens, because that is what
+	// the run's input_tokens counter means everywhere else; cache reads and
+	// writes are priced separately and are already inside MicroUSD.
+	used := Usage{
+		MicroUSD:     l.provider.CostMicroUSD(l.model, resp.Usage),
+		InputTokens:  resp.Usage.InputTokens,
+		OutputTokens: resp.Usage.OutputTokens,
+		Model:        l.model,
 	}
 	parsed, err := parseScores(resp.Text())
 	if err != nil {
-		return nil, err
+		return nil, used, err
 	}
 	out := make([]float64, len(cands))
 	for _, p := range parsed {
@@ -132,7 +163,7 @@ func (l *LLM) scoreBatch(ctx context.Context, query string, cands []Candidate) (
 			out[p.ID-1] = clamp(p.Score, 0, 10)
 		}
 	}
-	return out, nil
+	return out, used, nil
 }
 
 type parsedScore struct {

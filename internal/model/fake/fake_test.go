@@ -35,3 +35,13 @@ func TestScriptedProvider(t *testing.T) {
 		t.Fatalf("calls = %d", p.Calls())
 	}
 }
+
+func TestMaxOutputTokens(t *testing.T) {
+	p := New()
+	if got := p.MaxOutputTokens("m"); got != 0 {
+		t.Fatalf("default = %d, want 0 (the backend decides)", got)
+	}
+	if got := p.WithMaxOutputTokens(4096).MaxOutputTokens("m"); got != 4096 {
+		t.Fatalf("configured = %d, want 4096", got)
+	}
+}

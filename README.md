@@ -2,7 +2,7 @@
 
 A control plane for running LLM agents as durable, resumable, sandboxed, observable jobs.
 
-**Status: M3 (retrieval) complete.** Tracing and the eval harness are not implemented yet.
+**Status: M4 (control and visibility) complete.** The eval harness is not implemented yet.
 
 ## M1 — Real loop + durability
 
@@ -180,10 +180,10 @@ rather than fails: a provider error or an unparseable batch returns the fused or
 Two things about that reranker worth saying out loud. It is **the slow step**: with `qwen2.5:7b`
 on a laptop it is roughly 30 seconds per query against 50 candidates, against 0.3 seconds for
 everything before it, which is why `-rerank-candidates` is a flag and `-rerank=false` exists. And
-its model calls happen *inside a tool*, so their tokens are **not** counted in the run's
-`spent_usd`. With a local model that is $0 and true; pointing it at Claude would spend real money
-outside the budget, so a non-local rerank model is refused until M4 attributes tool-internal cost
-to the run.
+its model calls happen *inside a tool*. M3 shipped with those tokens outside the run's
+`spent_usd`, which is why a non-local rerank model was refused; M4 attributes them (ADR-23), and
+the refusal is kept as a price decision rather than a measurement problem — see
+[M4](#m4--control-and-visibility).
 
 Two tools reach it, both builtin tier and read-only: `search_corpus` (query, `k`, optional court
 and date filters) and `fetch_document` (by id or `source_id`, optionally a range of ordinals).
@@ -262,6 +262,163 @@ against the table — which is the convention M5's `CITATION` eval will check an
 sibling test asserts that a run allowlisted without `search_corpus` gets a non-retryable
 `tool_failed` when the model reaches for it anyway.
 
+## M4 — Control and visibility
+
+M1–M3 built the mechanisms and left the *controls* half-done on purpose: the budget check fired
+after the money was gone, and a cancel was honoured only between steps. M4 is where those come
+due, along with the observability that lets you see either of them happen.
+
+### The budget is a ceiling, not a receipt
+
+Before every model call the loop prices the call's worst case — the input it is about to send
+plus the largest output the provider would return — and refuses to make the call if that would
+carry the run past `budget_usd`. `make demo-budget` submits a $0.02 run against Opus:
+
+```
+event: budget_exceeded
+data: {"reason":"would_exceed","spent_micro_usd":0,"budget_micro_usd":20000,
+       "estimated_input_tokens":1339,"max_output_tokens":16000,"estimate_micro_usd":406695}
+event: run_finished
+data: {"status":"budget_exceeded","error":"next call estimated at 0.406695 USD
+       (1339 input + up to 16000 output tokens) with 0.020000 of 0.020000 USD left"}
+# status: budget_exceeded   spent: 0.0000 of 0.0200
+```
+
+It terminates at **$0.0000 spent**, and it does so without an API key, because the refusal
+happens before the provider is contacted. The old post-hoc check (`spent >= budget`) is kept as
+a backstop for a call that comes in over its estimate; the two are distinguished by
+`reason: "spent"` vs `"would_exceed"`. The estimate needs no tokenizer — the previous step's
+measured `input_tokens` plus `chars/4` for the tool results added since — and it deliberately
+errs high, so the runtime will sometimes refuse a call it could have afforded. For a hard budget
+that is the right direction to err (ADR-22).
+
+A tool that calls a model *inside itself* now pays into the same budget: `tool_succeeded`
+carries `cost_micro_usd` and token counts, and the transaction that writes it bumps `spent_usd`,
+so M3's reranker is accounted for and the budget bounds the **run** rather than only the loop
+(ADR-23). Two consequences worth stating: tool cost is committed *after* the tool runs, so the
+budget is a ceiling on model calls and an audit on tool calls; and `spent_usd` is the fold of
+`model_responded` **and** `tool_succeeded` costs, so checking it by summing only the former will
+come up short. The reranker stays local-only, but for a different reason than in M3 — measured,
+a hosted pass is about $0.04 per search, which was declined rather than unmeasurable.
+
+### Cancel interrupts
+
+`POST /v1/runs/:id/cancel` used to take effect at the next step boundary, which for a run inside
+a 10-minute model call or a 120-second sandbox call meant "eventually". The loop now polls the
+cancel flag every `-cancel-poll` (1s) during execution and cancels the context the call is
+running under. `make demo-cancel` puts a run inside a tool call with 30 seconds left to run,
+cancels it, and times the `run_finished` frame:
+
+```
+▶ POST /v1/runs/.../cancel and time the run_finished frame
+  cancel landed in 1.17s
+
+  1  run_started
+  2  model_requested
+  3  model_responded
+  4  tool_requested   compute_deadline
+  5  tool_failed      run cancelled
+  6  cancel_requested tool
+  7  run_finished     cancel requested
+```
+
+The log stays well-formed: the interrupted call gets a `tool_failed` and its ledger row moves to
+`failed` in the same transaction, rather than leaving a `tool_requested` that nothing answers. An
+interrupted *model* call deliberately leaves a dangling `model_requested` — there is no honest
+event to write, since the loop does not know what the provider did with the request — which is
+the same shape a crash mid-call produces and which `Reduce` has modelled since M1. Tokens spent
+on that call are lost. Cancelling a *queued* run needs no code: only a worker can write
+`run_started`, so a worker claims it and writes `run_started` → `cancel_requested` →
+`run_finished` in milliseconds (ADR-25).
+
+### One trace per run, across processes and crashes
+
+A run is submitted by one process, executed by another, and possibly finished by a third after a
+`kill -9`. In-process context propagation cannot span that, so the trace identity is durable: the
+API mints a trace id and a root span id at submission and stores them on the run row, and every
+worker rebuilds a remote parent from them. `GET /v1/runs/:id/trace` returns the deep link —
+`make trace RUN=<id>` opens it — and 404s for a run that has no trace rather than linking to an
+empty Jaeger page.
+
+![one run, one trace](docs/trace-waterfall.png)
+
+A `compute_deadline` run against `qwen2.5:7b`: 11 spans, two services, one minute three seconds
+end to end. `api.create_run` is the 11.73ms sliver the API process contributed at submission;
+everything under it is the worker. The shape of the bars is the answer to "where does a run's
+time go" — the two `model.complete` spans are 40.18s and 22.78s, while the two `tool.invoke`
+spans are 12.41ms and 8.07ms. Each `agent.step` pairs with the model call or the tool call it
+covers, and the attributes behind them carry the rest: `gen_ai.request.model` and the token
+counts on a model call, `agentd.tool.name`, its trust tier and outcome on a tool call, and the
+run's status, steps, tokens and cost on the root.
+
+`sandbox.exec` hangs under `tool.invoke` for a sandboxed call, and `retrieval.search` with its
+four stage children (`embed`, `vector`, `lexical`, `rerank`) for a corpus search — which is what
+makes the reranker's share of search latency visible instead of asserted.
+
+The same goal under `make crash-demo`, which `kill -9`s worker A mid-tool-call, is one trace
+across three processes — and the interesting part is what is missing from it:
+
+![one run, one trace, across a kill -9](docs/trace-crash.png)
+
+Read it top to bottom. Worker B's `agent.run.attempt` (teal) does not begin until **27.79s**,
+and everything before it belongs to worker A (tan) — sitting at the *top level* of the trace
+rather than under an attempt, because worker A's `agent.run.attempt` was never exported. Jaeger
+flags those spans with a warning badge for a parent it cannot find; the badge is the `kill -9`.
+The empty band from **17.34s to 27.79s** is the lease lapsing and worker B claiming. Then worker
+B re-executes the interrupted tool call, 8.01s of it, and finishes the run — and `agent.run`,
+emitted by worker B at that moment but back-dated to `created_at`, spans all 35.81s of it,
+including the crash.
+
+Three things the trace does that look wrong and are not (ADR-24). **A crashed attempt has no
+`agent.run.attempt` span**: the process died before it could end, so it was never exported,
+while its completed children were — that gap in the waterfall *is* the crash, drawn accurately.
+**The root span ends before its children**, because it is emitted retroactively by whichever
+worker writes the terminal event, back-dated to `created_at` and carrying the span id every
+attempt already points at. **A run that never finishes has no root span**; its children are still
+queryable by trace id, so the deep link still works.
+
+### Metrics on both processes
+
+`/metrics` on the API's listener and on the worker's own (`-metrics-addr`, default `:9091`,
+which also serves `/healthz` — the liveness probe compose was missing for the worker).
+`make metrics` curls both:
+
+```
+== api ==
+agentd_http_requests_total{code="201",method="POST",route="/v1/runs"} 1
+agentd_runs{status="succeeded"} 23              # from Postgres, survives a restart
+== worker ==
+agentd_model_calls_total{model="qwen2.5:7b",outcome="ok",provider="local"} 2
+agentd_model_latency_seconds_sum{model="qwen2.5:7b",provider="local"} 62.94
+agentd_runs_claimed_total{resumed="false"} 1
+agentd_budget_terminations_total{reason="would_exceed"} 1
+agentd_cancellations_total{phase="tool"} 1
+```
+
+The set covers runs by terminal status and duration, claims by resumed, steps, model calls by
+outcome (`ok`/`retried`/`failed`/`non_retryable`), tokens and dollars by model, tool invocations
+by name and outcome, sandbox timeouts and orphan sweeps, retrieval searches by mode and
+degradation, lease reaps and losses, budget terminations by reason, cancellations by phase, and
+HTTP requests by route pattern. Two of them are promises coming due:
+`agentd_leases_reaped_total` is ADR-7's, and `outcome="non_retryable"` is ADR-12's — which also
+brought the typed `model.NonRetryable` error, so the loop no longer burns three attempts on a
+refusal or a bad API key (ADR-27).
+
+Process counters are for events; the database answers for state. Counters reset on deploy, so
+`agentd_runs{status}` and `agentd_runs_oldest_queued_age_seconds` come from one indexed
+`GROUP BY` at scrape time — the queue-depth signal that actually pages someone. Metrics go
+through `client_golang` while traces go through OTel, because a scrape-time read from an
+external source of truth is exactly what `prometheus.Collector` is for (ADR-26). Labels never
+carry a run id, a goal, or any model-supplied string; HTTP requests are labelled with chi's
+matched route pattern (`/v1/runs/{id}`), never the path, and two tests assert it because the
+failure is silent.
+
+A `prometheus` service scrapes both processes inside compose (http://localhost:9090). The
+worker's metrics port is published with no fixed host port on purpose: `docker compose up
+--scale worker=2` — spec §2's two-worker lease demo — collides on the second replica the moment
+one is mapped, so Prometheus finds every replica by DNS and `docker compose port worker 9091`
+gets a host address when a human needs one.
+
 ## Quickstart
 
 You need Docker, Go 1.26, and [Ollama](https://ollama.com) on the host. For Claude, export
@@ -271,7 +428,7 @@ runs that target Claude fail with an authentication error.
 ```bash
 brew install ollama && ollama serve &   # or the desktop app
 make model-pull                         # ollama pull qwen2.5:7b and mxbai-embed-large
-make up                                 # builds agentd/sandbox:python, then Postgres 16 (pgvector), Jaeger, api, worker
+make up                                 # builds agentd/sandbox:python, then Postgres 16 (pgvector), Jaeger, Prometheus, api, worker
 make ingest-fixture                     # optional: load the 12-opinion corpus so the retrieval tools have something to find
 
 curl -X POST localhost:8080/v1/runs \
@@ -293,7 +450,9 @@ curl -N localhost:8080/v1/runs/<id>/stream
 ```
 
 `make demo` does the submit-and-tail in one step. Resume a dropped stream from where it
-left off with `-H 'Last-Event-ID: 5'`.
+left off with `-H 'Last-Event-ID: 5'`. `make trace RUN=<id>` opens that run's Jaeger waterfall
+(http://localhost:16686); `make metrics` prints both processes' counters, and Prometheus is at
+http://localhost:9090.
 
 The same run against Claude, with a budget the spend counter can be seen moving against:
 
@@ -336,7 +495,9 @@ The script starts worker A with a 5-second lease, submits a run whose `agent_con
 `tool_delay_ms: 8000` so each tool call is slow enough to interrupt, waits for the second tool
 call to start, `kill -9`s worker A, and starts worker B. The stream then shows worker B
 completing the interrupted call and finishing the run, and the event log shows the first tool
-call was never re-executed.
+call was never re-executed. It ends by printing the run's Jaeger link: both workers' spans are
+in one trace, and the missing `agent.run.attempt` span is worker A's death — that trace is the
+second waterfall in [M4](#m4--control-and-visibility).
 
 ![crash demo](docs/crash-demo.gif)
 
@@ -353,12 +514,21 @@ make work        # worker, in a second shell; talks to Ollama on localhost:11434
 Both `serve` and `work` apply migrations at startup (advisory-locked, so racing them is safe)
 and retry the initial connection for 30s. Worker flags: `-model-url`, `-model`, `-lease`,
 `-reaper-interval`, `-owner`, `-anthropic-prices`, `-anthropic-thinking-display`,
-`-sandbox-image`, `-sandbox-timeout`, `-sandbox-max-timeout`. Env equivalents: `AGENTD_MODEL_URL`,
-`AGENTD_MODEL`, `AGENTD_DSN`, `AGENTD_WORKER_OWNER`, `AGENTD_ANTHROPIC_PRICES`,
-`AGENTD_ANTHROPIC_THINKING_DISPLAY`, `AGENTD_SANDBOX_IMAGE`, `AGENTD_SANDBOX_TIMEOUT`,
-`AGENTD_SANDBOX_MAX_TIMEOUT`. Credentials for Claude come from `ANTHROPIC_API_KEY` (or a
-profile from `ant auth login`); `-model claude-opus-5` makes Claude the default for runs that
-name no model.
+`-sandbox-image`, `-sandbox-timeout`, `-sandbox-max-timeout`, `-cancel-poll`, `-metrics-addr`.
+Env equivalents: `AGENTD_MODEL_URL`, `AGENTD_MODEL`, `AGENTD_DSN`, `AGENTD_WORKER_OWNER`,
+`AGENTD_ANTHROPIC_PRICES`, `AGENTD_ANTHROPIC_THINKING_DISPLAY`, `AGENTD_SANDBOX_IMAGE`,
+`AGENTD_SANDBOX_TIMEOUT`, `AGENTD_SANDBOX_MAX_TIMEOUT`, `AGENTD_CANCEL_POLL`,
+`AGENTD_METRICS_ADDR`. Credentials for Claude come from `ANTHROPIC_API_KEY` (or a profile from
+`ant auth login`); `-model claude-opus-5` makes Claude the default for runs that name no model.
+
+Telemetry is off unless it is configured, on both commands: `-otlp-endpoint`
+(`OTEL_EXPORTER_OTLP_ENDPOINT`) turns tracing on, `-otel-service` (`OTEL_SERVICE_NAME`) names
+the process in the waterfall, and `serve` takes `-jaeger-ui` (`AGENTD_JAEGER_UI`) for the base
+URL of the deep links it hands out. With no endpoint set the tracer is a no-op, which is what
+`make test`, `agentd ingest`, and `agentd eval` want; an *unreachable* collector is a warning
+rather than a fatal, because the OTLP exporter retries on its own. `-metrics-addr ""` turns the
+worker's listener off — worth it when running two workers on one host, where the second would
+otherwise log a warning and carry on without `/metrics`.
 
 The worker finds Docker the way the CLI does: `DOCKER_HOST`, then the current `docker context`
 (so Docker Desktop's per-user socket on macOS works without configuration), then
@@ -374,10 +544,16 @@ daemon or the sandbox image is missing at boot the worker logs a warning and kee
 | `GET` | `/v1/runs/:id` | `{run, state}`: the row plus the reduced event log |
 | `GET` | `/v1/runs/:id/events` | full event log as JSON |
 | `GET` | `/v1/runs/:id/stream` | SSE tail, replays from `Last-Event-ID` |
-| `POST` | `/v1/runs/:id/cancel` | cooperative cancel; the worker finishes the run as `cancelled` |
+| `GET` | `/v1/runs/:id/trace` | `{trace_id, url}`: the Jaeger deep link; 404 when the run has no trace |
+| `POST` | `/v1/runs/:id/cancel` | cancel; interrupts an in-flight model or tool call within `-cancel-poll` |
 | `POST` | `/v1/runs/:id/resume` | force-release the lease so any worker can pick the run up |
 | `GET` | `/v1/tools` | registry listing with schemas and trust tiers |
 | `GET` | `/healthz` | liveness |
+| `GET` | `/metrics` | Prometheus exposition, including the Postgres-backed run gauges |
+
+The worker serves `/metrics` and `/healthz` of its own on `-metrics-addr` (default `:9091`);
+`agentd healthz -addr <host:port>` probes either, which is how compose health-checks a
+distroless image with no shell in it.
 
 `agent_config` fields: `model` (picks the provider too: `anthropic/<id>`, `local/<name>`, a
 bare `claude-*` id, or anything else for the local runtime), `system_prompt`, `tools`
@@ -401,15 +577,21 @@ a retryable `tool_failed` rather than a wrong answer.
 | `model_requested` | step, model, sha256 of the request, params |
 | `model_responded` | step, provider, model, content blocks (text, tool_use, and any thinking blocks, kept verbatim), stop_reason, usage (with cache token counts), cost_micro_usd |
 | `tool_requested` | tool_use_id, name, args (its seq keys the `tool_calls` ledger) |
-| `tool_succeeded` | tool_use_id, name, result, duration_ms, exit_code, replayed |
+| `tool_succeeded` | tool_use_id, name, result, duration_ms, exit_code, replayed, and any model spend the tool incurred inside itself (cost_micro_usd, input_tokens, output_tokens, cost_model) |
 | `tool_failed` | tool_use_id, name, error, retryable |
-| `budget_exceeded` | spent_micro_usd, budget_micro_usd |
-| `cancel_requested` | source |
+| `budget_exceeded` | spent_micro_usd, budget_micro_usd, reason (`spent` or `would_exceed`), and for a pre-flight refusal the estimate that produced it (estimate_micro_usd, estimated_input_tokens, max_output_tokens) |
+| `cancel_requested` | source, phase (`idle`, `model`, `tool`) |
 | `run_finished` | status, final_answer, error |
 
 `Reduce` rejects malformed logs (seq gaps, events after `run_finished`, results for tool calls
 that were never requested) rather than tolerating them; a worker acting on a misread log is
-worse than one that refuses.
+worse than one that refuses. The M4 payload fields are all additive, so a log written before
+them reduces unchanged.
+
+The run's counters are the fold of the log, and since M4 that fold has two terms: `spent_usd`,
+`input_tokens`, and `output_tokens` are `model_responded` **plus** `tool_succeeded` costs.
+Summing only `model_responded` to check the counters will come up short by whatever the tools
+spent (ADR-23).
 
 ## Tests
 
@@ -440,6 +622,20 @@ run real containers against the local daemon; the `run_python` tool and the loop
 a scripted executor so the tool's behaviour (exit codes as data, timeout annotations, label
 propagation, schema bounds) is covered without Docker.
 
+M4's controls are tested the same way — no Jaeger, no collector, no API key. Spans go to an
+in-memory `tracetest.SpanRecorder`, so a full fake-model run asserts that every span lands in
+the trace id stored on the row and that a resumed run's spans join the first attempt's; the ID
+generator is tested for the hazard that matters, that a planted root span id is used once and a
+derived context gets a random one. Budget and cancellation run against a priced fake provider
+and a blocking tool: a run whose next call would exceed its budget emits
+`budget_exceeded{reason:"would_exceed"}` and never calls the provider, and a cancel during a
+tool call that would otherwise run for 30 seconds finishes the run `cancelled`, writes
+`tool_failed{retryable:false}`, and leaves the ledger row `failed`. Metrics are asserted through
+`testutil.CollectAndCompare` on exposition text, including that the Postgres collector renders
+one series per status and that a failed query does not take the scrape down with it. The live
+paths — `make demo-budget`, `make demo-cancel`, `make crash-demo` under compose — are M4's
+`test-live` equivalent and are run by hand.
+
 ## Layout
 
 ```
@@ -451,14 +647,16 @@ internal/tools/        # Tool interface, registry + schema validation; builtin/,
 internal/sandbox/      # Executor interface, Docker executor, limits, output capping, safety tests
 internal/retrieval/    # Searcher + RRF; chunk/, embed/ (Ollama + fake), courtlistener/, rerank/, eval/
 internal/store/        # Postgres access, fenced writes, ledger, corpus queries, embedded migrations
+internal/telemetry/    # tracer setup, span helpers + names, the root-span ID generator, slog correlation, Prometheus instruments
 internal/testutil/     # shared testcontainers Postgres fixture
 evals/retrieval/       # checked-in fixture corpus, labeled queries, results.json
 scripts/crash-demo.sh  # the kill -9 demo
+scripts/demo-cancel.sh # cancel a run mid-tool-call and time it
 scripts/compare-providers.sh  # one goal, both providers, trajectories side by side
 docs/DECISIONS.md      # ADRs
 docs/SECURITY.md       # threat model
 docs/plans/            # per-milestone plans
-deploy/                # docker-compose.yml, Dockerfile, sandbox/Dockerfile
+deploy/                # docker-compose.yml, Dockerfile, sandbox/Dockerfile, prometheus.yml
 ```
 
 ## Notes on choices
@@ -469,11 +667,17 @@ calls vs exactly-once tool calls, lease fencing, micro-USD cost accounting, the 
 submission-time allowlists, reduce-every-iteration, provider routing by model name, thinking
 blocks as opaque log content, refusing to call an unpriced model, the Engine API over the
 docker CLI, failing scripts as results rather than tool failures, inputs through an anonymous
-volume, and the boot-time orphan sweep.
+volume, the boot-time orphan sweep, the pre-flight budget ceiling, tool-internal cost
+attribution, one trace per run via a durable trace id, interrupting cancellation,
+`client_golang` alongside OTel, and typed non-retryable provider errors.
 
 Earlier notes from M0 still hold: hand-written pgx rather than sqlc while the schema moves;
 SSE polls the log at 200ms rather than `LISTEN/NOTIFY`; the terminal status and
 `run_finished` event now commit in one transaction.
+
+`LISTEN/NOTIFY` is now the upgrade two polls are waiting on — the SSE tail's 200ms and the
+cancel watcher's 1s. The SSE one is the more valuable target, because it is per connected
+client rather than per worker.
 
 ## Future work
 
@@ -481,9 +685,20 @@ Human-in-the-loop approval flows are out of scope for v1 (spec §2) and would sl
 `approval_requested` / `approval_granted` event pair that suspends the loop.
 
 Deferred deliberately, with the seam already in place: `POST /v1/corpus/ingest` is an async
-wrapper over `agentd ingest` and lands with the other API polish in M6; attributing a
-reranker's model calls to the run's `spent_usd` needs a `cost_micro_usd` on `tool_succeeded`
-and lands with M4's cost work, which is why M3 refuses a hosted rerank model rather than
-spending outside a budget; a cross-encoder reranker is a second implementation of
-`rerank.Reranker`; and planted-document injection tests are M5, which the JSONL ingest format
-was shaped to make a one-line edit.
+wrapper over `agentd ingest` and lands with the other API polish in M6; a cross-encoder reranker
+is a second implementation of `rerank.Reranker`; and planted-document injection tests are M5,
+which the JSONL ingest format was shaped to make a one-line edit.
+
+Two items that were listed here through M3 are closed. Tool-internal model cost **is** attributed
+to the run as of M4, so the budget bounds the run rather than the loop; the local-only rerank
+policy is kept anyway, as a price decision with the numbers behind it rather than for want of a
+mechanism (ADR-23). And the observability the README used to describe as "not implemented yet"
+is the milestone above.
+
+What M4 deliberately did not build: pre-flighting *tool* cost, which would mean the registry
+predicting each tool's spend before invoking it for a hole bounded by one tool call; per-tenant
+or global budgets and topping up a running run, which need the multi-tenancy §2 puts out of
+scope; the OTel *logs* signal, since `slog` to stdout with trace ids on every line is the log
+path; and Grafana dashboards, an OTel Collector, and tail-based sampling — Jaeger direct and
+`AlwaysSample` are right for a few runs a minute, and the production shape is this paragraph
+rather than a container.

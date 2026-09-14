@@ -161,4 +161,9 @@ type Provider interface {
 	// providers return 0; the value is still recorded so budget enforcement
 	// exercises the same path regardless of backend.
 	CostMicroUSD(model string, u Usage) int64
+	// MaxOutputTokens is the output cap this provider applies to a request
+	// that names none. The loop needs a number for the output term of its
+	// pre-flight budget estimate (ADR-22); zero means the backend decides and
+	// the estimate falls back to the input term alone.
+	MaxOutputTokens(model string) int
 }

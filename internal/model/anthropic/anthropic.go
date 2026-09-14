@@ -116,9 +116,32 @@ func (p *Provider) CostMicroUSD(m string, u model.Usage) int64 {
 // Price returns the rate card for a model, if known.
 func (p *Provider) Price(m string) (model.Price, bool) { return p.prices.lookup(m) }
 
+// MaxOutputTokens implements model.Provider. It is DefaultMaxTokens for every
+// model, which is exactly what toParams substitutes when a request names no
+// cap, so the loop's pre-flight estimate prices the same worst case the call
+// would actually have been allowed to produce.
+func (p *Provider) MaxOutputTokens(string) int { return DefaultMaxTokens }
+
+// nonRetryableStatus reports whether an HTTP status from the Messages API
+// describes a request that will fail identically however many times it is
+// sent: a malformed body, a bad credential, a caller without access, an
+// unknown model, an unprocessable request. 408, 409, 429, and every 5xx are
+// left out deliberately — those are the statuses the retry exists for, and the
+// SDK is already backing off on them under its own MaxRetries (ADR-27).
+func nonRetryableStatus(code int) bool {
+	switch code {
+	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden,
+		http.StatusNotFound, http.StatusUnprocessableEntity:
+		return true
+	default:
+		return false
+	}
+}
+
 // RefusalError is returned when the API declines to answer (stop_reason
-// "refusal"). It is not retryable; the loop's retries are bounded so a
-// refused run fails within a few seconds rather than looping.
+// "refusal"). Complete returns it inside a model.NonRetryableError: the model
+// declined the request, not this attempt at it, so a refused run fails on the
+// first call rather than after three identical ones (ADR-27).
 type RefusalError struct {
 	Model       string
 	Category    string
@@ -139,30 +162,41 @@ func (e *RefusalError) Error() string {
 // Complete implements model.Provider.
 func (p *Provider) Complete(ctx context.Context, req model.Request) (*model.Response, error) {
 	if req.Model == "" {
-		return nil, errors.New("anthropic: model is required")
+		return nil, model.NonRetryable(errors.New("anthropic: model is required"))
 	}
 	if _, ok := p.prices.lookup(req.Model); !ok {
-		return nil, fmt.Errorf("anthropic: no price configured for model %q; budget enforcement needs one (set AGENTD_ANTHROPIC_PRICES or Config.Price)", req.Model)
+		// A price list is configuration, not weather: retrying cannot add the
+		// entry that is missing.
+		return nil, model.NonRetryable(fmt.Errorf("anthropic: no price configured for model %q; budget enforcement needs one (set AGENTD_ANTHROPIC_PRICES or Config.Price)", req.Model))
 	}
 	params, err := toParams(req, p.cfg)
 	if err != nil {
-		return nil, fmt.Errorf("anthropic: %w", err)
+		// A request that cannot even be translated — an unknown role, a tool
+		// whose input schema is not an object, a content block this provider
+		// has no wire form for — is malformed, not unlucky. It never reaches
+		// the API, and the next two attempts would not reach it either.
+		return nil, model.NonRetryable(fmt.Errorf("anthropic: %w", err))
 	}
 
 	msg, err := p.client.Messages.New(ctx, params)
 	if err != nil {
 		var apiErr *sdk.Error
 		if errors.As(err, &apiErr) {
-			return nil, fmt.Errorf("anthropic: HTTP %d %s: %w", apiErr.StatusCode, apiErr.Type(), err)
+			apiFail := fmt.Errorf("anthropic: HTTP %d %s: %w", apiErr.StatusCode, apiErr.Type(), err)
+			if nonRetryableStatus(apiErr.StatusCode) {
+				return nil, model.NonRetryable(apiFail)
+			}
+			return nil, apiFail
 		}
+		// A transport failure has no status to judge, so it stays retryable.
 		return nil, fmt.Errorf("anthropic: %w", err)
 	}
 	if msg.StopReason == sdk.StopReasonRefusal {
-		return nil, &RefusalError{
+		return nil, model.NonRetryable(&RefusalError{
 			Model:       string(msg.Model),
 			Category:    string(msg.StopDetails.Category),
 			Explanation: msg.StopDetails.Explanation,
-		}
+		})
 	}
 	return fromMessage(msg, req.Model), nil
 }

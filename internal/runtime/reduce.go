@@ -48,6 +48,10 @@ type State struct {
 	SpentMicroUSD int64 `json:"spent_micro_usd"`
 	InputTokens   int64 `json:"input_tokens"`
 	OutputTokens  int64 `json:"output_tokens"`
+	// LastInputTokens is the prompt size the provider measured on the most
+	// recent model_responded. It is the first term of the loop's pre-flight
+	// budget estimate, which is why it is carried rather than recomputed.
+	LastInputTokens int64 `json:"last_input_tokens,omitempty"`
 
 	CancelRequested bool   `json:"cancel_requested"`
 	FinalAnswer     string `json:"final_answer,omitempty"`
@@ -124,6 +128,10 @@ func (s *State) apply(ev store.Event) error {
 		s.InputTokens += p.Usage.InputTokens
 		s.OutputTokens += p.Usage.OutputTokens
 		s.SpentMicroUSD += p.CostMicroUSD
+		// The whole prompt, cached parts included: the estimate that uses
+		// this is sizing the *next* prompt, which contains everything this
+		// one did whether or not the provider had to read it fresh.
+		s.LastInputTokens = p.Usage.InputTokens + p.Usage.CacheReadInputTokens + p.Usage.CacheCreationInputTokens
 		s.Messages = append(s.Messages, model.Message{Role: model.RoleAssistant, Content: p.Content})
 		s.OpenToolUses = nil
 		for _, b := range p.Content {
@@ -155,6 +163,14 @@ func (s *State) apply(ev store.Event) error {
 		if err != nil {
 			return err
 		}
+		// Model spend the tool incurred inside itself. It moves the same
+		// counters a model_responded does, because the budget bounds the run
+		// rather than only the loop (ADR-23). LastInputTokens is deliberately
+		// left alone: a tool's internal prompt is not the loop's prompt, and
+		// using it to size the next completion would be nonsense.
+		s.SpentMicroUSD += p.CostMicroUSD
+		s.InputTokens += p.InputTokens
+		s.OutputTokens += p.OutputTokens
 		s.appendToolResult(model.ContentBlock{
 			Type:      model.BlockToolResult,
 			ToolUseID: p.ToolUseID,

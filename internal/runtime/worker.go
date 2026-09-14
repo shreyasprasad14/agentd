@@ -8,9 +8,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/shreyasprasad/agentd/internal/model"
 	"github.com/shreyasprasad/agentd/internal/store"
+	"github.com/shreyasprasad/agentd/internal/telemetry"
 	"github.com/shreyasprasad/agentd/internal/tools"
 )
 
@@ -33,6 +36,15 @@ type WorkerConfig struct {
 	Registry *tools.Registry
 	// DefaultModel is used when a run's agent_config has no model.
 	DefaultModel string
+	// CancelPoll is how often the loop checks a running run's cancel flag.
+	// Defaults to DefaultCancelPoll.
+	CancelPoll time.Duration
+	// Tracer emits the spans of every run this worker claims. Nil means no
+	// tracing, which is what a worker started without a collector gets.
+	Tracer trace.Tracer
+	// Metrics counts claims, lease reaps, and everything the loop records.
+	// Nil records nothing, which is what a worker serving no /metrics gets.
+	Metrics *telemetry.Metrics
 }
 
 func (c WorkerConfig) withDefaults() WorkerConfig {
@@ -54,6 +66,15 @@ func (c WorkerConfig) withDefaults() WorkerConfig {
 	}
 	if c.Registry == nil {
 		c.Registry = tools.NewRegistry()
+	}
+	if c.CancelPoll <= 0 {
+		c.CancelPoll = DefaultCancelPoll
+	}
+	if c.Tracer == nil {
+		// Defaulted here as well as in NewLoop so that cfg.Tracer is a usable
+		// tracer everywhere a Worker reads its own config, rather than a
+		// field whose nilness each reader has to remember.
+		c.Tracer = noop.NewTracerProvider().Tracer("")
 	}
 	return c
 }
@@ -82,7 +103,13 @@ func NewWorker(st *store.Store, log *slog.Logger, cfg WorkerConfig) *Worker {
 		store: st,
 		log:   log,
 		cfg:   cfg,
-		loop:  NewLoop(st, cfg.Provider, cfg.Registry, log, cfg.Owner, cfg.DefaultModel),
+		loop: NewLoop(st, cfg.Provider, cfg.Registry, log, LoopConfig{
+			Owner:        cfg.Owner,
+			DefaultModel: cfg.DefaultModel,
+			CancelPoll:   cfg.CancelPoll,
+			Tracer:       cfg.Tracer,
+			Metrics:      cfg.Metrics,
+		}),
 	}
 }
 
@@ -118,37 +145,78 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 }
 
+// runContext puts the run's trace identity on ctx so the worker's log lines
+// about it name the same trace its spans do. It starts no span: the loop's
+// attempt span is the first real span of this attempt, and a second one here
+// would draw a bar for the worker's bookkeeping.
+//
+// A run submitted before M4, or with tracing off, has no ids and gets ctx back
+// unchanged — the log lines then simply carry no trace id, as they always did.
+func (w *Worker) runContext(ctx context.Context, run *store.Run) context.Context {
+	if run.TraceID == nil || run.RootSpanID == nil {
+		return ctx
+	}
+	return telemetry.RemoteParent(ctx, *run.TraceID, *run.RootSpanID)
+}
+
 func (w *Worker) claimAndExecute(ctx context.Context) (bool, error) {
 	run, err := w.store.ClaimRun(ctx, w.cfg.Owner, w.cfg.LeaseDuration)
 	if err != nil || run == nil {
 		return false, err
 	}
-	w.log.Info("run claimed", "run_id", run.ID, "goal", run.Goal)
+	// The worker's own lines about this run sit outside every span the loop
+	// creates, so without this they would be the only lines in a run's life
+	// with no trace id — and they are the ones the crash demo is read through:
+	// "run claimed" by the second worker is where the resume becomes visible.
+	// Rebuilding the remote parent is enough, because a valid span context is
+	// all the log handler needs to name the trace.
+	ctx = w.runContext(ctx, run)
+	w.log.InfoContext(ctx, "run claimed", "run_id", run.ID, "goal", run.Goal)
 
-	execCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	go w.heartbeat(execCtx, run.ID, cancel)
+	execCtx, lost := context.WithCancel(ctx)
+	defer lost()
+	go w.heartbeat(execCtx, run.ID, lost)
 
-	err = w.loop.Execute(execCtx, run)
-	switch {
-	case err == nil:
-		return true, nil
-	case ctx.Err() != nil:
-		// Shutting down: leave the lease to expire so another worker
-		// resumes the run. This is the crash-recovery path.
-		w.log.Info("shutdown mid-run, leaving lease", "run_id", run.ID)
-		return true, nil
-	case errors.Is(err, store.ErrLeaseLost):
-		w.log.Warn("lease lost mid-run, another worker owns it", "run_id", run.ID)
-		return true, nil
-	default:
-		w.log.Error("run failed", "run_id", run.ID, "error", err)
+	outcome, err := w.loop.Execute(execCtx, run)
+	if err != nil {
+		// A genuine failure: the loop left no terminal event, so the worker
+		// writes one. Under a detached context, because a run that failed
+		// for its own reasons should not be left for another worker to
+		// rediscover.
+		w.log.ErrorContext(ctx, "run failed", "run_id", run.ID, "error", err)
 		ferr := w.loop.finish(context.WithoutCancel(ctx), run.ID, StatusFailed, "", err.Error())
 		if errors.Is(ferr, store.ErrLeaseLost) {
+			// The run failed *and* the lease was gone, so this worker wrote
+			// no terminal event: the run belongs to whoever holds the lease
+			// now, and only the lease loss is this worker's to report.
+			w.cfg.Metrics.LeaseLost()
 			return true, nil
 		}
 		return true, ferr
 	}
+
+	// The one place that can tell the three non-failure endings apart, which
+	// is why the lease-loss counter lives here rather than next to the
+	// heartbeat that noticed or the fenced write that refused (ADR-25).
+	switch outcome {
+	case OutcomeLeaseLost:
+		w.cfg.Metrics.LeaseLost()
+		w.log.WarnContext(ctx, "lease lost mid-run, another worker owns it", "run_id", run.ID)
+	case OutcomeShutdown:
+		// The loop reports a shutdown for any context death it did not cause
+		// itself, and cannot tell the two apart: both arrive as a dead
+		// parent context. The worker can, because it owns both — the outer
+		// context is its own shutdown, execCtx is what the heartbeat kills
+		// when the lease is gone. Either way the lease is left to expire and
+		// another worker resumes the run; only the log line differs.
+		if ctx.Err() == nil {
+			w.cfg.Metrics.LeaseLost()
+			w.log.WarnContext(ctx, "lease lost mid-run, another worker owns it", "run_id", run.ID)
+			break
+		}
+		w.log.InfoContext(ctx, "shutdown mid-run, leaving lease", "run_id", run.ID)
+	}
+	return true, nil
 }
 
 // heartbeat renews the lease at a third of its duration so a brief stall does
@@ -177,8 +245,9 @@ func (w *Worker) heartbeat(ctx context.Context, runID uuid.UUID, lost context.Ca
 }
 
 // reaper sweeps expired leases back to the queue. ClaimRun would find them
-// regardless; the sweep makes the hand-off visible in the logs and, from M4,
-// in a metric.
+// regardless; the sweep makes the hand-off visible in the logs and in
+// agentd_leases_reaped_total, which is the counter ADR-7 promised when it
+// kept a reaper whose only observable effect was a log line.
 func (w *Worker) reaper(ctx context.Context) {
 	ticker := time.NewTicker(w.cfg.ReaperInterval)
 	defer ticker.Stop()
@@ -193,6 +262,7 @@ func (w *Worker) reaper(ctx context.Context) {
 				continue
 			}
 			if n > 0 {
+				w.cfg.Metrics.LeasesReaped(n)
 				w.log.Info("requeued runs with expired leases", "count", n)
 			}
 		}

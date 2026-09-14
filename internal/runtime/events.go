@@ -36,6 +36,18 @@ const (
 	StatusBudgetExceeded = "budget_exceeded"
 )
 
+// Statuses is the whole run_status enum, in the order a run moves through it.
+//
+// It exists for the metrics collector, which reports a status with no runs as
+// an explicit zero: a series that appears only once something has gone wrong
+// is one every alert rule has to be written twice to handle. A function
+// rather than a package-level slice so a caller cannot reorder the enum for
+// everyone else.
+func Statuses() []string {
+	return []string{StatusQueued, StatusRunning, StatusSucceeded, StatusFailed,
+		StatusCancelled, StatusBudgetExceeded}
+}
+
 // AgentConfig is the per-run configuration stored in runs.agent_config and
 // snapshotted into run_started. Tools is the allowlist, fixed at submission.
 type AgentConfig struct {
@@ -104,6 +116,14 @@ type ToolSucceededPayload struct {
 	DurationMS int64           `json:"duration_ms"`
 	ExitCode   int             `json:"exit_code"`
 	Replayed   bool            `json:"replayed,omitempty"`
+	// CostMicroUSD and the token counts are model spend the tool incurred
+	// inside itself. The transaction that writes this event bumps the run's
+	// counters by them, so spent_usd is the fold of model_responded *and*
+	// tool_succeeded costs (ADR-23).
+	CostMicroUSD int64  `json:"cost_micro_usd,omitempty"`
+	InputTokens  int64  `json:"input_tokens,omitempty"`
+	OutputTokens int64  `json:"output_tokens,omitempty"`
+	CostModel    string `json:"cost_model,omitempty"`
 }
 
 // ToolFailedPayload is a tool error. The error text goes back to the model as
@@ -115,15 +135,45 @@ type ToolFailedPayload struct {
 	Retryable bool   `json:"retryable"`
 }
 
-// BudgetExceededPayload precedes a budget_exceeded run_finished.
+// Budget termination reasons.
+const (
+	// BudgetReasonSpent is the post-hoc backstop: the counters already
+	// passed the budget, because a call came in over its estimate.
+	BudgetReasonSpent = "spent"
+	// BudgetReasonWouldExceed is the pre-flight ceiling: the next call's
+	// worst case does not fit, so it was never made (ADR-22).
+	BudgetReasonWouldExceed = "would_exceed"
+)
+
+// BudgetExceededPayload precedes a budget_exceeded run_finished. Every field
+// past the first two is omitempty because a log written before M4 carries
+// none of them and must still reduce.
 type BudgetExceededPayload struct {
 	SpentMicroUSD  int64 `json:"spent_micro_usd"`
 	BudgetMicroUSD int64 `json:"budget_micro_usd"`
+	// Reason is BudgetReasonSpent or BudgetReasonWouldExceed. Empty in logs
+	// written before M4.
+	Reason string `json:"reason,omitempty"`
+	// EstimateMicroUSD is what the refused call was priced at, and the rest
+	// is how that price was reached, so a refusal can be argued with.
+	EstimateMicroUSD     int64 `json:"estimate_micro_usd,omitempty"`
+	EstimatedInputTokens int64 `json:"estimated_input_tokens,omitempty"`
+	MaxOutputTokens      int64 `json:"max_output_tokens,omitempty"`
 }
+
+// Phases a run can be interrupted in, for CancelRequestedPayload.Phase.
+const (
+	CancelPhaseIdle  = "idle"
+	CancelPhaseModel = "model"
+	CancelPhaseTool  = "tool"
+)
 
 // CancelRequestedPayload records who asked.
 type CancelRequestedPayload struct {
 	Source string `json:"source"`
+	// Phase is where the run was when the cancel was observed: "idle"
+	// between steps, "model" inside a completion, "tool" inside a tool call.
+	Phase string `json:"phase,omitempty"`
 }
 
 // RunFinishedPayload is the terminal event.

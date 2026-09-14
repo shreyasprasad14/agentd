@@ -84,9 +84,20 @@ func addRerankFlags(fs *flag.FlagSet) rerankFlags {
 }
 
 // buildReranker wires the LLM reranker on the local provider. A hosted
-// rerank model is refused: the reranker's calls happen inside a tool, so
-// their cost would land outside the run's budget (M4 attributes it; until
-// then only the $0 local model is honest).
+// rerank model is still refused, but not because the spend would be
+// invisible: tool-internal model cost now lands on tool_succeeded and in
+// spent_usd, so a paid reranker would be measured and bounded like any
+// other call (ADR-23).
+//
+// The refusal is a price decision instead. Measured, a hosted pass runs
+// about 11,000 input and 500 output tokens per search — roughly $0.04 at
+// Sonnet-class rates, or ~20% on top of a six-step research run, so three
+// searches is closer to +65%. That is affordable and was still declined, in
+// exchange for runs that are cheap by construction and a restriction that
+// needs no per-run reasoning. What it gives up is the latency win: M3
+// measures the local reranker at 10–30s per search, the slowest step in a
+// research run, where a hosted model running four batches at once would
+// finish in seconds. Revisit if search latency becomes the complaint.
 func (f rerankFlags) buildReranker(onBox *local.Provider, workerModel string, log *slog.Logger) (rerank.Reranker, string, error) {
 	if !*f.on {
 		return nil, "", nil
@@ -96,7 +107,7 @@ func (f rerankFlags) buildReranker(onBox *local.Provider, workerModel string, lo
 		name = workerModel
 	}
 	if anthropic.IsClaudeModel(name) || strings.HasPrefix(name, "anthropic/") {
-		return nil, "", fmt.Errorf("rerank model %q routes to Anthropic; reranker cost is not attributed to run budgets yet, so only local models are allowed (set -rerank-model or -rerank=false)", name)
+		return nil, "", fmt.Errorf("rerank model %q routes to Anthropic; the reranker is local-only by policy — a hosted pass measures at about $0.04 per search, which was declined to keep runs cheap by construction (set -rerank-model to a local model, or -rerank=false)", name)
 	}
 	name = strings.TrimPrefix(name, "local/")
 	return rerank.NewLLM(onBox, name, log), name, nil

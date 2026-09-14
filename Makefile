@@ -9,7 +9,10 @@ COURT ?= scotus
 LIMIT ?= 2500
 CORPUS ?= data/corpus/$(COURT).jsonl
 
-.PHONY: build test test-short test-sandbox test-retrieval test-live test-live-anthropic up down logs migrate serve work demo demo-anthropic demo-python demo-legal compare crash-demo model-pull sandbox-build fetch-corpus ingest ingest-fixture eval-retrieval fmt vet
+JAEGER_UI ?= http://localhost:16686
+PROMETHEUS_UI ?= http://localhost:9090
+
+.PHONY: build test test-short test-sandbox test-retrieval test-live test-live-anthropic up down logs migrate serve work demo demo-anthropic demo-python demo-legal demo-budget demo-cancel compare crash-demo trace metrics model-pull sandbox-build fetch-corpus ingest ingest-fixture eval-retrieval fmt vet
 
 build:
 	go build ./...
@@ -129,6 +132,23 @@ demo-legal:
 	echo "run $$id"; \
 	curl -N "localhost:8080/v1/runs/$$id/stream"
 
+## demo-budget submits a Claude run with a two-cent budget. The run stops
+## before the call that would exceed it, so spent_usd stays under the number
+## rather than being audited past it (ADR-22).
+demo-budget:
+	@id=$$(curl -s -X POST localhost:8080/v1/runs \
+		-H 'content-type: application/json' \
+		-d '{"goal":"Research the history of the Fourth Amendment in detail, then call finish with a thorough summary.","agent_config":{"model":"anthropic/$(ANTHROPIC_MODEL)"},"budget_usd":"0.02"}' \
+		| jq -r .id); \
+	echo "run $$id  (budget \$$0.02)"; \
+	curl -sN "localhost:8080/v1/runs/$$id/stream" | grep --line-buffered -E '^(event|data)' | grep --line-buffered -E 'budget|finished' || true; \
+	curl -s "localhost:8080/v1/runs/$$id" | jq -r '"status: \(.run.status)\nspent: \(.run.spent_usd) of \(.run.budget_usd)"'
+
+## demo-cancel cancels a run that is inside a long tool call and prints how
+## long the cancel took to land.
+demo-cancel:
+	./scripts/demo-cancel.sh
+
 ## compare runs the same goal against the local model and Claude and diffs the trajectories.
 compare:
 	ANTHROPIC_MODEL="$(ANTHROPIC_MODEL)" ./scripts/compare-providers.sh
@@ -136,3 +156,20 @@ compare:
 ## crash-demo kills a worker mid-tool-call and shows a second worker resume the run.
 crash-demo:
 	DSN="$(DSN)" MODEL_URL="$(MODEL_URL)" MODEL="$(MODEL)" ./scripts/crash-demo.sh
+
+## trace prints (and on macOS opens) the Jaeger deep link for a run: make trace RUN=<id>.
+trace:
+	@test -n "$(RUN)" || { echo "usage: make trace RUN=<run-id>" >&2; exit 1; }
+	@url=$$(curl -s "localhost:8080/v1/runs/$(RUN)/trace" | jq -r '.url // empty'); \
+	if [ -z "$$url" ]; then echo "run $(RUN) has no trace (submitted before M4, or with tracing off)" >&2; exit 1; fi; \
+	echo "$$url"; command -v open >/dev/null && open "$$url" || true
+
+## metrics curls both processes' /metrics. The worker's port is published on
+## an ephemeral host port so `--scale worker=2` does not collide, so its
+## address is asked of compose rather than assumed.
+metrics:
+	@echo "== api =="; curl -s localhost:8080/metrics | grep -E '^agentd_[a-z_]+( |\{)' | grep -v ' 0$$' | head -30
+	@addr=$$($(COMPOSE) port worker 9091 2>/dev/null | head -1); \
+	if [ -z "$$addr" ]; then echo "\n(worker not running under compose; try: curl localhost:9091/metrics)"; exit 0; fi; \
+	echo "\n== worker ($$addr) =="; curl -s "http://$$addr/metrics" | grep -E '^agentd_[a-z_]+( |\{)' | grep -v ' 0$$' | head -30
+	@echo "\nPrometheus: $(PROMETHEUS_UI)   Jaeger: $(JAEGER_UI)"

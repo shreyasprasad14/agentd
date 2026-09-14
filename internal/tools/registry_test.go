@@ -111,6 +111,28 @@ func TestRegistryResolve(t *testing.T) {
 	}
 }
 
+func TestCostAddAndIsZero(t *testing.T) {
+	a := Cost{MicroUSD: 1200, InputTokens: 11000, OutputTokens: 500, Model: "reranker-7b"}
+	b := Cost{MicroUSD: 300, InputTokens: 2000, OutputTokens: 80, Model: "other"}
+
+	want := Cost{MicroUSD: 1500, InputTokens: 13000, OutputTokens: 580, Model: "reranker-7b"}
+	if got := a.Add(b); got != want {
+		t.Fatalf("Add = %+v, want %+v", got, want)
+	}
+	if got := (Cost{}).Add(b); got.Model != "other" {
+		t.Fatalf("an empty cost must take the other's model, got %q", got.Model)
+	}
+	if !(Cost{}).IsZero() {
+		t.Fatal("the zero cost is what every builtin reports")
+	}
+	if !(Cost{Model: "reranker-7b"}).IsZero() {
+		t.Fatal("a model name with no tokens behind it is still nothing spent")
+	}
+	if a.IsZero() {
+		t.Fatal("a priced cost is not zero")
+	}
+}
+
 func TestTrustTierJSON(t *testing.T) {
 	b, _ := json.Marshal(map[string]TrustTier{"t": Sandboxed})
 	if string(b) != `{"t":"sandboxed"}` {

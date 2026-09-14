@@ -11,16 +11,29 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/shreyasprasad/agentd/internal/runtime"
 	"github.com/shreyasprasad/agentd/internal/store"
+	"github.com/shreyasprasad/agentd/internal/telemetry"
 	"github.com/shreyasprasad/agentd/internal/tools"
 )
+
+// DefaultJaegerUI is where Jaeger sits in deploy/docker-compose.yml as seen
+// from a browser on the host. It is deliberately not derived from the OTLP
+// endpoint: the collector address the process exports to (http://jaeger:4318
+// inside compose) is not an address the reader of the deep link can open.
+//
+// It is exported so cmd/agentd can print it as the -jaeger-ui default instead
+// of repeating the literal, which is how the flag and the fallback drift.
+const DefaultJaegerUI = "http://localhost:16686"
 
 // Options tunes the server.
 type Options struct {
@@ -34,6 +47,15 @@ type Options struct {
 	// run's default allowlist at submission and to serve GET /v1/tools.
 	// It must match what the workers register.
 	Registry *tools.Registry
+	// Tracer records the API's spans. Nil means tracing is off; withDefaults
+	// swaps in a no-op tracer so no handler branches on it.
+	Tracer trace.Tracer
+	// JaegerUI is the browser-facing base URL that GET /v1/runs/:id/trace
+	// builds its deep link against. Empty means DefaultJaegerUI.
+	JaegerUI string
+	// Metrics backs GET /metrics. Nil turns the endpoint into a 404 and
+	// records nothing, which is what a test that does not care gets.
+	Metrics *telemetry.Metrics
 }
 
 func (o Options) withDefaults() Options {
@@ -46,6 +68,12 @@ func (o Options) withDefaults() Options {
 	if o.Registry == nil {
 		o.Registry = tools.NewRegistry()
 	}
+	if o.Tracer == nil {
+		o.Tracer = noop.NewTracerProvider().Tracer("")
+	}
+	if o.JaegerUI == "" {
+		o.JaegerUI = DefaultJaegerUI
+	}
 	return o
 }
 
@@ -57,30 +85,97 @@ type Server struct {
 }
 
 // NewServer builds a Server. A nil logger falls back to the default.
+//
+// When metrics are on it also registers the run-state collector, because the
+// API process is the one that should answer questions about the runs table:
+// it already holds the store, and unlike a worker there is exactly one kind
+// of it, so the same gauge is not reported by every replica (ADR-26).
 func NewServer(st *store.Store, log *slog.Logger, opts Options) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Server{store: st, log: log, opts: opts.withDefaults()}
+	s := &Server{store: st, log: log, opts: opts.withDefaults()}
+	if s.opts.Metrics != nil && st != nil {
+		if err := s.opts.Metrics.Register(s.runStateCollector()); err != nil {
+			// Not fatal: a control plane that cannot report a gauge is still
+			// a control plane. The only way to get here is registering two
+			// servers against one registry, which is a wiring bug rather
+			// than a runtime condition.
+			s.log.Warn("run state collector not registered", "error", err)
+		}
+	}
+	return s
+}
+
+// runStateCollector adapts the store to the collector's one-query interface.
+// The two reads are one closure because they are one scrape of one table, and
+// splitting them would mean two failure paths to report the same outage.
+func (s *Server) runStateCollector() *telemetry.RunStateCollector {
+	return telemetry.NewRunStateCollector(runtime.Statuses(), func(ctx context.Context) (telemetry.RunState, error) {
+		counts, err := s.store.RunCounts(ctx)
+		if err != nil {
+			return telemetry.RunState{}, err
+		}
+		state := telemetry.RunState{Counts: make(map[string]int64, len(counts))}
+		for _, c := range counts {
+			state.Counts[c.Status] = c.Count
+		}
+		if state.OldestQueued, state.HasQueued, err = s.store.OldestQueuedAge(ctx); err != nil {
+			return telemetry.RunState{}, err
+		}
+		return state, nil
+	}, s.log)
 }
 
 // Router returns the mounted HTTP routes.
 func (s *Server) Router() http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
+	r.Use(s.count)
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
+	// Served on the API's existing listener, unauthenticated like everything
+	// else here (spec §2 puts auth out of scope) and with no run ids in any
+	// label, so exposing it leaks nothing a scrape should not see.
+	r.Handle("/metrics", s.opts.Metrics.Handler())
 	r.Get("/v1/tools", s.listTools)
 	r.Route("/v1/runs", func(r chi.Router) {
 		r.Post("/", s.createRun)
 		r.Get("/{id}", s.getRun)
 		r.Get("/{id}/events", s.listEvents)
 		r.Get("/{id}/stream", s.streamRun)
+		r.Get("/{id}/trace", s.traceRun)
 		r.Post("/{id}/cancel", s.cancelRun)
 		r.Post("/{id}/resume", s.resumeRun)
 	})
 	return r
+}
+
+// count records every request as agentd_http_requests_total.
+//
+// The label is chi's matched route *pattern*, never the path: r.URL.Path is
+// "/v1/runs/4f3c.../events", which would mint a new time series per run and
+// eventually take the process down with it. That is the cardinality rule the
+// whole metrics layer is written against, and this is the one place in the
+// codebase where breaking it would be easy and invisible.
+//
+// The pattern is read after the handler returns because chi fills it in while
+// routing; a request that matched nothing has none, and is counted as "other".
+func (s *Server) count(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
+		defer func() {
+			code := ww.Status()
+			if code == 0 {
+				// A handler that returned without writing anything: Go sends
+				// 200 for it, so that is what the client saw.
+				code = http.StatusOK
+			}
+			s.opts.Metrics.HTTPRequest(chi.RouteContext(r.Context()).RoutePattern(), r.Method, code)
+		}()
+		next.ServeHTTP(ww, r)
+	})
 }
 
 // CreateRunRequest is the POST /v1/runs body.
@@ -118,27 +213,94 @@ func (s *Server) createRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "agent_config: "+err.Error())
 		return
 	}
-
-	run, err := s.store.CreateRun(r.Context(), req.Goal, cfg, req.MaxSteps, req.BudgetUSD)
+	rawCfg, err := json.Marshal(cfg)
 	if err != nil {
+		s.log.Error("encode agent config", "error", err)
+		writeError(w, http.StatusInternalServerError, "could not create run")
+		return
+	}
+
+	// The span starts only once the request is known to be valid: a rejected
+	// submission creates no run, so there is no run trace for it to belong
+	// to, and inventing one would put spans in Jaeger for runs that do not
+	// exist.
+	//
+	// The run's trace identity is minted here rather than by the worker
+	// because the row is the only place it can live. A context does not
+	// survive the queue between this process and the worker, let alone the
+	// kill -9 between two attempts (ADR-24).
+	traceID, rootSpanID := telemetry.NewIDs()
+
+	// RemoteParent is the right tool even though the span it names as parent
+	// does not exist yet. It asserts where this span belongs, not that a
+	// parent has already been exported: the worker that writes the terminal
+	// event emits agent.run later with exactly this span id, back-dated to
+	// created_at, and api.create_run is then its child. Until that happens —
+	// and forever, for a run that never finishes — Jaeger renders
+	// api.create_run as a parentless span of the run's trace, which is the
+	// same degradation the plan already documents for an unfinished run.
+	// Starting a fresh trace instead is the one genuinely wrong answer: the
+	// submission would land in a different waterfall from the run it
+	// submitted.
+	ctx := telemetry.RemoteParent(r.Context(), traceID.String(), rootSpanID.String())
+	ctx, span := s.opts.Tracer.Start(ctx, telemetry.SpanCreateRun)
+	span.SetAttributes(
+		telemetry.AttrBudgetUSD.String(req.BudgetUSD),
+		telemetry.AttrMaxSteps.Int(int(req.MaxSteps)),
+		telemetry.AttrToolCount.Int(len(cfg.Tools)),
+	)
+
+	// Whether tracing is on is a question this handler can only ask of the
+	// span it just started. The server holds a trace.Tracer, never a
+	// *telemetry.Telemetry with its Enabled method: only cmd/agentd owns a
+	// provider, which is what lets a test hand this package a recorder
+	// instead. IsRecording is the honest discriminator among what a Tracer
+	// offers; SpanContext().IsValid() is not, because the no-op tracer
+	// faithfully propagates the remote parent planted above and so hands
+	// back a valid span context whether tracing is on or off.
+	//
+	// A run submitted with tracing off stores NULL rather than the ids just
+	// minted, because GET /v1/runs/:id/trace 404s on exactly that, and a
+	// deep link to a trace no collector ever received is worse than no link.
+	var storedTraceID, storedRootSpanID string
+	if span.IsRecording() {
+		storedTraceID, storedRootSpanID = traceID.String(), rootSpanID.String()
+	}
+
+	run, err := s.store.CreateRun(ctx, store.NewRun{
+		Goal:        req.Goal,
+		AgentConfig: rawCfg,
+		MaxSteps:    req.MaxSteps,
+		BudgetUSD:   req.BudgetUSD,
+		TraceID:     storedTraceID,
+		RootSpanID:  storedRootSpanID,
+	})
+	if err != nil {
+		telemetry.End(span, err)
 		s.log.Error("create run", "error", err)
 		writeError(w, http.StatusInternalServerError, "could not create run")
 		return
 	}
-	s.log.Info("run submitted", "run_id", run.ID)
+	span.SetAttributes(telemetry.AttrRunID.String(run.ID.String()))
+	telemetry.End(span, nil)
+
+	s.log.InfoContext(ctx, "run submitted", "run_id", run.ID)
 	writeJSON(w, http.StatusCreated, CreateRunResponse{ID: run.ID, Status: run.Status})
 }
 
 // normalizeConfig validates agent_config strictly and fixes the tool
 // allowlist at submission time (spec §10): a run that names no tools gets
 // every registered tool, and one that names unknown tools is rejected.
-func (s *Server) normalizeConfig(raw json.RawMessage) (json.RawMessage, error) {
+//
+// It returns the parsed config rather than its JSON so the caller can both
+// store it and count its tools; marshalling it back is the caller's job.
+func (s *Server) normalizeConfig(raw json.RawMessage) (runtime.AgentConfig, error) {
 	var cfg runtime.AgentConfig
 	if len(raw) > 0 {
 		dec := json.NewDecoder(bytes.NewReader(raw))
 		dec.DisallowUnknownFields()
 		if err := dec.Decode(&cfg); err != nil {
-			return nil, err
+			return cfg, err
 		}
 	}
 	if cfg.Tools == nil {
@@ -146,13 +308,13 @@ func (s *Server) normalizeConfig(raw json.RawMessage) (json.RawMessage, error) {
 	}
 	for _, name := range cfg.Tools {
 		if _, ok := s.opts.Registry.Get(name); !ok {
-			return nil, fmt.Errorf("unknown tool %q", name)
+			return cfg, fmt.Errorf("unknown tool %q", name)
 		}
 	}
 	if cfg.ToolDelayMS < 0 {
-		return nil, errors.New("tool_delay_ms must not be negative")
+		return cfg, errors.New("tool_delay_ms must not be negative")
 	}
-	return json.Marshal(cfg)
+	return cfg, nil
 }
 
 // RunResponse is GET /v1/runs/:id: the row plus the reduced event log.
@@ -179,6 +341,44 @@ func (s *Server) getRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, RunResponse{Run: run, State: &state})
+}
+
+// TraceResponse is GET /v1/runs/:id/trace: the run's trace id and the Jaeger
+// deep link that opens it.
+type TraceResponse struct {
+	TraceID string `json:"trace_id"`
+	URL     string `json:"url"`
+}
+
+// traceRun returns the deep link to the run's trace, or 404 when there is no
+// trace to link to — a run created before M4, or one submitted while tracing
+// was off.
+//
+// The 404 is the whole point of the handler. Rendering a link for a trace no
+// collector ever received would be worse than having no endpoint: the link
+// resolves to an empty Jaeger page, which reads as "your trace was lost"
+// rather than "this run was never traced", and the first is a bug report.
+func (s *Server) traceRun(w http.ResponseWriter, r *http.Request) {
+	run, ok := s.lookupRun(w, r)
+	if !ok {
+		return
+	}
+	if run.TraceID == nil || *run.TraceID == "" {
+		writeError(w, http.StatusNotFound, "run has no trace")
+		return
+	}
+	writeJSON(w, http.StatusOK, TraceResponse{
+		TraceID: *run.TraceID,
+		URL:     traceURL(s.opts.JaegerUI, *run.TraceID),
+	})
+}
+
+// traceURL joins the Jaeger UI base with the trace path, tolerating a base
+// that was configured with or without a trailing slash. Both spellings are
+// what an operator actually types into -jaeger-ui, and a doubled slash makes
+// a link that still works but looks broken enough to be reported as one.
+func traceURL(base, traceID string) string {
+	return strings.TrimRight(base, "/") + "/trace/" + traceID
 }
 
 // cancelRun sets the cooperative cancel flag; the worker finishes the run
@@ -272,6 +472,12 @@ func (s *Server) streamRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	lastSeq := lastEventID(r)
+
+	// The gauge is the one number that says whether streams are being left
+	// open: every other SSE signal is a rate, and a client that connects and
+	// never disconnects shows up in none of them.
+	s.opts.Metrics.SSEStreamOpened()
+	defer s.opts.Metrics.SSEStreamClosed()
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")

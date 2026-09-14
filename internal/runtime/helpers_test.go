@@ -14,6 +14,7 @@ import (
 	"github.com/shreyasprasad/agentd/internal/model/fake"
 	"github.com/shreyasprasad/agentd/internal/runtime"
 	"github.com/shreyasprasad/agentd/internal/store"
+	"github.com/shreyasprasad/agentd/internal/telemetry"
 	"github.com/shreyasprasad/agentd/internal/testutil"
 	"github.com/shreyasprasad/agentd/internal/tools"
 	"github.com/shreyasprasad/agentd/internal/tools/builtin"
@@ -66,6 +67,24 @@ func (b *blockingTool) waitStarted(t *testing.T) {
 	}
 }
 
+// costingTool reports model spend it incurred inside itself, which is what
+// search_corpus does once its LLM reranker has run. It stands in for the
+// reranker so the attribution path can be tested without an embedder, a
+// corpus, or a second model.
+type costingTool struct {
+	cost  tools.Cost
+	calls atomic.Int32
+}
+
+func (c *costingTool) Name() string               { return "costly" }
+func (c *costingTool) Description() string        { return "spends model tokens inside itself" }
+func (c *costingTool) Schema() json.RawMessage    { return json.RawMessage(`{"type":"object"}`) }
+func (c *costingTool) TrustTier() tools.TrustTier { return tools.Builtin }
+func (c *costingTool) Invoke(context.Context, tools.Invocation) (tools.Result, error) {
+	c.calls.Add(1)
+	return tools.Result{Content: json.RawMessage(`{"searched":true}`), Cost: c.cost}, nil
+}
+
 type fixture struct {
 	t        *testing.T
 	st       *store.Store
@@ -73,18 +92,30 @@ type fixture struct {
 	registry *tools.Registry
 	deadline *countingTool
 	slow     *blockingTool
+	costly   *costingTool
+	// cancelPoll is what every worker this fixture starts polls the cancel
+	// flag at. The production default is a second, which a test that measures
+	// cancel latency would spend waiting; set it before startWorker to change
+	// it.
+	cancelPoll time.Duration
+	// metrics is the registry every worker this fixture starts records into.
+	// Nil for all but the metrics tests, which is also the production shape
+	// for a worker started with -metrics-addr "".
+	metrics *telemetry.Metrics
 }
 
 func newFixture(t *testing.T, provider *fake.Provider) *fixture {
 	t.Helper()
 	f := &fixture{
-		t:        t,
-		st:       testutil.Postgres(t),
-		provider: provider,
-		deadline: &countingTool{Tool: builtin.ComputeDeadline{}},
-		slow:     newBlockingTool(),
+		t:          t,
+		st:         testutil.Postgres(t),
+		provider:   provider,
+		deadline:   &countingTool{Tool: builtin.ComputeDeadline{}},
+		slow:       newBlockingTool(),
+		costly:     &costingTool{},
+		cancelPoll: 50 * time.Millisecond,
 	}
-	f.registry = tools.NewRegistry().MustRegister(builtin.Finish{}, f.deadline, f.slow)
+	f.registry = tools.NewRegistry().MustRegister(builtin.Finish{}, f.deadline, f.slow, f.costly)
 	return f
 }
 
@@ -107,6 +138,8 @@ func (f *fixture) startWorkerWith(provider model.Provider, owner string, lease t
 		Provider:       provider,
 		Registry:       f.registry,
 		DefaultModel:   "fake-model",
+		CancelPoll:     f.cancelPoll,
+		Metrics:        f.metrics,
 	})
 	done := make(chan struct{})
 	go func() {
@@ -141,7 +174,12 @@ func (f *fixture) submit(goal string, o runOpts) uuid.UUID {
 	}
 	cfg, err := json.Marshal(runtime.AgentConfig{Model: o.model, Tools: o.tools, ToolDelayMS: o.toolDelay})
 	require.NoError(f.t, err)
-	run, err := f.st.CreateRun(context.Background(), goal, cfg, o.maxSteps, o.budget)
+	run, err := f.st.CreateRun(context.Background(), store.NewRun{
+		Goal:        goal,
+		AgentConfig: cfg,
+		MaxSteps:    o.maxSteps,
+		BudgetUSD:   o.budget,
+	})
 	require.NoError(f.t, err)
 	return run.ID
 }
@@ -209,4 +247,8 @@ func finishCall(id, answer string) *model.Response {
 
 func slowCall(id string) *model.Response {
 	return fake.ToolUse(id, "slow", map[string]any{}, usage)
+}
+
+func costlyCall(id string) *model.Response {
+	return fake.ToolUse(id, "costly", map[string]any{}, usage)
 }

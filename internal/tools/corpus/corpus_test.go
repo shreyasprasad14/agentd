@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/shreyasprasad/agentd/internal/retrieval"
+	"github.com/shreyasprasad/agentd/internal/retrieval/rerank"
 	"github.com/shreyasprasad/agentd/internal/store"
 	"github.com/shreyasprasad/agentd/internal/tools"
 )
@@ -131,6 +132,25 @@ func TestSearchResultShape(t *testing.T) {
 	require.Equal(t, "II. Analysis", out.Hits[0].Section)
 	require.Equal(t, 9.0, out.Hits[0].Score, "reranked hits report the rerank score")
 	require.False(t, out.Truncated)
+	require.True(t, res.Cost.IsZero(), "a search whose reranker spent nothing costs the run nothing")
+}
+
+func TestSearchCostIsRuntimeAccountingNotContext(t *testing.T) {
+	fs := &fakeSearcher{res: &retrieval.Result{
+		Mode: retrieval.ModeHybridRerank, CandidatesConsidered: 4, Hits: hits(1, 40),
+		Usage: rerank.Usage{MicroUSD: 41000, InputTokens: 11000, OutputTokens: 500, Model: "reranker-7b"},
+	}}
+	res, err := NewSearch(fs).Invoke(context.Background(), tools.Invocation{Args: json.RawMessage(`{"query":"qualified immunity"}`)})
+	require.NoError(t, err)
+	require.Equal(t,
+		tools.Cost{MicroUSD: 41000, InputTokens: 11000, OutputTokens: 500, Model: "reranker-7b"},
+		res.Cost, "the reranker's spend reaches the loop, which bills it to the run")
+
+	// The model is told what it found, not what it cost: a token budget is
+	// not something the model can act on, and it would be one more thing to
+	// hallucinate about.
+	require.NotContains(t, string(res.Content), "micro_usd")
+	require.NotContains(t, string(res.Content), "reranker-7b")
 }
 
 func TestSearchResultCapped(t *testing.T) {

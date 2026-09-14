@@ -64,6 +64,28 @@ func (p *Provider) CostMicroUSD(m string, u model.Usage) int64 {
 	return p.cfg.Price[m].Cost(u)
 }
 
+// MaxOutputTokens implements model.Provider. A request's max_tokens is passed
+// through as it arrives, zero included, and the runtime decides for itself, so
+// there is no default to report. Nothing is lost by reporting zero: local
+// tokens are free, so the budget estimate this feeds never binds here anyway.
+func (p *Provider) MaxOutputTokens(string) int { return 0 }
+
+// nonRetryableStatus reports whether an HTTP status from a local runtime
+// describes a request that will fail identically however many times it is
+// sent: a malformed body, a rejected key, a model that is not installed.
+// Everything else — connection failures, 5xx, a truncated body — stays
+// retryable, because a runtime that is still loading a model answers with
+// exactly those and the retry is the thing that makes it work (ADR-27).
+func nonRetryableStatus(code int) bool {
+	switch code {
+	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden,
+		http.StatusNotFound, http.StatusUnprocessableEntity:
+		return true
+	default:
+		return false
+	}
+}
+
 // Wire types: the subset of the chat completions schema we use.
 
 type wireMessage struct {
@@ -150,7 +172,11 @@ func (p *Provider) Complete(ctx context.Context, req model.Request) (*model.Resp
 		fmt.Fprintf(os.Stderr, "--- local model response %d ---\n%s\n", resp.StatusCode, raw)
 	}
 	if resp.StatusCode/100 != 2 {
-		return nil, fmt.Errorf("local model: HTTP %d: %s", resp.StatusCode, truncate(string(raw), 512))
+		err := fmt.Errorf("local model: HTTP %d: %s", resp.StatusCode, truncate(string(raw), 512))
+		if nonRetryableStatus(resp.StatusCode) {
+			return nil, model.NonRetryable(err)
+		}
+		return nil, err
 	}
 
 	var wr wireResponse

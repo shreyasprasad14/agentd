@@ -148,7 +148,15 @@ func (t *Search) Invoke(ctx context.Context, inv tools.Invocation) (tools.Result
 	if err != nil {
 		return tools.Result{}, err
 	}
-	return tools.Result{Content: content}, nil
+	// The reranker's spend rides on the Result, not in the JSON above: it is
+	// runtime accounting for the run's budget, and the context window is for
+	// what the model needs to answer with.
+	return tools.Result{Content: content, Cost: tools.Cost{
+		MicroUSD:     res.Usage.MicroUSD,
+		InputTokens:  res.Usage.InputTokens,
+		OutputTokens: res.Usage.OutputTokens,
+		Model:        res.Usage.Model,
+	}}, nil
 }
 
 // capSearchResult drops trailing hits until the serialised result fits the

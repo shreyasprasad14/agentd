@@ -63,6 +63,40 @@ type Invocation struct {
 	Args  json.RawMessage
 }
 
+// Cost is model spend a tool incurred inside itself. It is kept here rather
+// than in the model package so tools does not depend on model: the loop
+// converts it when it writes tool_succeeded (ADR-23).
+type Cost struct {
+	MicroUSD     int64 `json:"micro_usd,omitempty"`
+	InputTokens  int64 `json:"input_tokens,omitempty"`
+	OutputTokens int64 `json:"output_tokens,omitempty"`
+	// Model names the backend that was billed, for the event log.
+	Model string `json:"model,omitempty"`
+}
+
+// Add sums two costs. The first non-empty Model wins, since a tool that
+// calls one model repeatedly is the case worth naming.
+func (c Cost) Add(o Cost) Cost {
+	sum := Cost{
+		MicroUSD:     c.MicroUSD + o.MicroUSD,
+		InputTokens:  c.InputTokens + o.InputTokens,
+		OutputTokens: c.OutputTokens + o.OutputTokens,
+		Model:        c.Model,
+	}
+	if sum.Model == "" {
+		sum.Model = o.Model
+	}
+	return sum
+}
+
+// IsZero reports whether the tool spent nothing, which is every builtin. A
+// Model name with no tokens behind it is still nothing spent: there are no
+// counters to bump, and naming a backend that was never billed would put a
+// cost on tool_succeeded that no invoice agrees with.
+func (c Cost) IsZero() bool {
+	return c.MicroUSD == 0 && c.InputTokens == 0 && c.OutputTokens == 0
+}
+
 // Result is what a tool returns. Content goes back to the model, wrapped in
 // the data envelope by the loop.
 type Result struct {
@@ -71,6 +105,11 @@ type Result struct {
 	ExitCode int
 	// Terminal marks a tool whose successful call ends the run (finish).
 	Terminal bool
+	// Cost is model spend the tool incurred inside itself. The loop adds it
+	// to the run's counters in the same transaction as tool_succeeded, so a
+	// tool that calls a model is bounded by the run's budget rather than
+	// invisible to it.
+	Cost Cost
 }
 
 // Tool is the one interface every callable capability implements.

@@ -65,8 +65,13 @@ type Run struct {
 	CancelRequested bool            `json:"cancel_requested"`
 	LeaseOwner      *string         `json:"lease_owner,omitempty"`
 	LeaseExpiresAt  *time.Time      `json:"lease_expires_at,omitempty"`
-	CreatedAt       time.Time       `json:"created_at"`
-	FinishedAt      *time.Time      `json:"finished_at,omitempty"`
+	// TraceID and RootSpanID are null for runs submitted with tracing off and
+	// for every run created before M4, which is why they are pointers: the
+	// trace endpoint has to tell "no trace" apart from "trace id is empty".
+	TraceID    *string    `json:"trace_id,omitempty"`
+	RootSpanID *string    `json:"root_span_id,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+	FinishedAt *time.Time `json:"finished_at,omitempty"`
 }
 
 // Event mirrors a row of the append-only run_events table.
@@ -106,14 +111,18 @@ func (s *Store) Close() { s.pool.Close() }
 // Pool exposes the underlying pool for callers that need raw access (tests).
 func (s *Store) Pool() *pgxpool.Pool { return s.pool }
 
+// runColumns is shared by every query that returns a whole run — CreateRun,
+// GetRun and ClaimRun — so a column added here must be added to scanRun in the
+// same position. A mismatch is a scan error at runtime, not a compile error.
 const runColumns = `id, status, goal, agent_config, max_steps, budget_usd::text, spent_usd::text,
-	input_tokens, output_tokens, cancel_requested, lease_owner, lease_expires_at, created_at, finished_at`
+	input_tokens, output_tokens, cancel_requested, lease_owner, lease_expires_at,
+	trace_id, root_span_id, created_at, finished_at`
 
 func scanRun(row pgx.Row) (*Run, error) {
 	var r Run
 	err := row.Scan(&r.ID, &r.Status, &r.Goal, &r.AgentConfig, &r.MaxSteps, &r.BudgetUSD,
 		&r.SpentUSD, &r.InputTokens, &r.OutputTokens, &r.CancelRequested, &r.LeaseOwner,
-		&r.LeaseExpiresAt, &r.CreatedAt, &r.FinishedAt)
+		&r.LeaseExpiresAt, &r.TraceID, &r.RootSpanID, &r.CreatedAt, &r.FinishedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -203,16 +212,41 @@ func (s *Store) withMigrationLock(ctx context.Context, fn func(pgx.Tx) error) er
 	return tx.Commit(ctx)
 }
 
+// NewRun is the input to CreateRun.
+type NewRun struct {
+	Goal        string
+	AgentConfig json.RawMessage
+	MaxSteps    int32
+	BudgetUSD   string
+	// TraceID and RootSpanID tie every span the run ever emits, from any
+	// process and any attempt, into one trace (ADR-24). Empty when tracing
+	// is off, which stores NULL and makes GET /v1/runs/:id/trace a 404.
+	TraceID    string
+	RootSpanID string
+}
+
+// nullString maps the zero string to a NULL column. An absent trace id must
+// read back as NULL rather than as the empty string, because the difference is
+// what the trace endpoint answers 404 on.
+func nullString(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
 // CreateRun inserts a queued run. Workers pick it up from the same table.
-func (s *Store) CreateRun(ctx context.Context, goal string, agentConfig json.RawMessage, maxSteps int32, budgetUSD string) (*Run, error) {
+func (s *Store) CreateRun(ctx context.Context, p NewRun) (*Run, error) {
+	agentConfig := p.AgentConfig
 	if len(agentConfig) == 0 {
 		agentConfig = json.RawMessage(`{}`)
 	}
 	row := s.pool.QueryRow(ctx, `
-		INSERT INTO runs (id, goal, agent_config, max_steps, budget_usd)
-		VALUES ($1, $2, $3, $4, $5::numeric)
+		INSERT INTO runs (id, goal, agent_config, max_steps, budget_usd, trace_id, root_span_id)
+		VALUES ($1, $2, $3, $4, $5::numeric, $6, $7)
 		RETURNING `+runColumns,
-		uuid.New(), goal, agentConfig, maxSteps, budgetUSD)
+		uuid.New(), p.Goal, agentConfig, p.MaxSteps, p.BudgetUSD,
+		nullString(p.TraceID), nullString(p.RootSpanID))
 	return scanRun(row)
 }
 
@@ -283,6 +317,26 @@ func (s *Store) AppendEvent(ctx context.Context, runID uuid.UUID, owner, eventTy
 	return ev, err
 }
 
+// bumpCounters adds one call's usage to the run's counters. It is the only
+// writer of spent_usd, input_tokens, and output_tokens: both the model path
+// and the tool path go through it, inside the same transaction as the event
+// that reports the spend. A zero cost and zero tokens are a no-op.
+func bumpCounters(ctx context.Context, tx pgx.Tx, runID uuid.UUID, inputTokens, outputTokens, costMicroUSD int64) error {
+	// Every builtin tool completes with nothing to add, so skipping the
+	// statement entirely — rather than adding zero — keeps the common tool
+	// path at one round trip.
+	if inputTokens == 0 && outputTokens == 0 && costMicroUSD == 0 {
+		return nil
+	}
+	_, err := tx.Exec(ctx, `
+		UPDATE runs SET
+			input_tokens  = input_tokens  + $2,
+			output_tokens = output_tokens + $3,
+			spent_usd     = spent_usd + ($4::numeric / 1000000)
+		WHERE id = $1`, runID, inputTokens, outputTokens, costMicroUSD)
+	return err
+}
+
 // AppendModelResponse appends a model_responded event and bumps the run's
 // token and spend counters in the same transaction, so the log and the
 // counters can never disagree. Cost is in micro-USD.
@@ -294,13 +348,7 @@ func (s *Store) AppendModelResponse(ctx context.Context, runID uuid.UUID, owner,
 		if ev, err = appendEventTx(ctx, tx, runID, eventType, payload); err != nil {
 			return err
 		}
-		_, err = tx.Exec(ctx, `
-			UPDATE runs SET
-				input_tokens  = input_tokens  + $2,
-				output_tokens = output_tokens + $3,
-				spent_usd     = spent_usd + ($4::numeric / 1000000)
-			WHERE id = $1`, runID, inputTokens, outputTokens, costMicroUSD)
-		return err
+		return bumpCounters(ctx, tx, runID, inputTokens, outputTokens, costMicroUSD)
 	})
 	return ev, err
 }
@@ -332,8 +380,14 @@ func (s *Store) RequestToolCall(ctx context.Context, runID uuid.UUID, owner, eve
 // matching tool_succeeded or tool_failed event, in one transaction. Because
 // the two are atomic, a resumed worker never finds a completed ledger row
 // without its event, and never re-executes a call whose result committed.
+//
+// The counter arguments are model spend the tool incurred inside itself, and
+// they are committed with the event for the same reason the model path's are:
+// the budget bounds the run, not only the loop (ADR-23). Every builtin passes
+// zeroes.
 func (s *Store) CompleteToolCall(ctx context.Context, runID uuid.UUID, owner string, seq int32,
-	status string, result json.RawMessage, eventType string, payload any) (*Event, error) {
+	status string, result json.RawMessage, eventType string, payload any,
+	inputTokens, outputTokens, costMicroUSD int64) (*Event, error) {
 	var ev *Event
 	err := s.withRunLease(ctx, runID, owner, func(tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx, `
@@ -345,8 +399,10 @@ func (s *Store) CompleteToolCall(ctx context.Context, runID uuid.UUID, owner str
 		if tag.RowsAffected() != 1 {
 			return fmt.Errorf("tool call (%s, %d) has no ledger row", runID, seq)
 		}
-		ev, err = appendEventTx(ctx, tx, runID, eventType, payload)
-		return err
+		if ev, err = appendEventTx(ctx, tx, runID, eventType, payload); err != nil {
+			return err
+		}
+		return bumpCounters(ctx, tx, runID, inputTokens, outputTokens, costMicroUSD)
 	})
 	return ev, err
 }
@@ -503,4 +559,71 @@ func (s *Store) RequestCancel(ctx context.Context, runID uuid.UUID) (bool, error
 		return false, err
 	}
 	return tag.RowsAffected() == 1, nil
+}
+
+// IsCancelRequested reads just the cancel flag. The loop's cancel watcher
+// polls it once a second per running run, so it is deliberately one indexed
+// single-row read rather than a full GetRun (ADR-25).
+func (s *Store) IsCancelRequested(ctx context.Context, runID uuid.UUID) (bool, error) {
+	var requested bool
+	err := s.pool.QueryRow(ctx, `SELECT cancel_requested FROM runs WHERE id = $1`, runID).Scan(&requested)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, ErrNotFound
+	}
+	if err != nil {
+		return false, fmt.Errorf("read cancel flag: %w", err)
+	}
+	return requested, nil
+}
+
+// StatusCount is one row of RunCounts.
+type StatusCount struct {
+	Status string
+	Count  int64
+}
+
+// RunCounts groups every run by status. It backs the API's Postgres-backed
+// Prometheus gauge: process counters reset on deploy, this does not (ADR-26).
+//
+// Statuses with no runs are absent rather than zero — the collector knows the
+// enum and fills them in, and this query only reports what exists.
+func (s *Store) RunCounts(ctx context.Context) ([]StatusCount, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT status::text, count(*) FROM runs GROUP BY status ORDER BY status`)
+	if err != nil {
+		return nil, fmt.Errorf("count runs by status: %w", err)
+	}
+	defer rows.Close()
+	var out []StatusCount
+	for rows.Next() {
+		var sc StatusCount
+		if err := rows.Scan(&sc.Status, &sc.Count); err != nil {
+			return nil, err
+		}
+		out = append(out, sc)
+	}
+	return out, rows.Err()
+}
+
+// OldestQueuedAge is how long the oldest queued run has been waiting, and
+// false when the queue is empty. It is the queue-depth signal worth paging on.
+//
+// The age is computed in Postgres so it does not depend on the scraping
+// process's clock agreeing with the database's, which is the clock every
+// created_at was stamped by.
+func (s *Store) OldestQueuedAge(ctx context.Context) (time.Duration, bool, error) {
+	// min() over no rows is NULL, so the empty queue arrives as a nil pointer
+	// rather than as an age of zero — which is what a run queued this instant
+	// would legitimately report.
+	var seconds *float64
+	err := s.pool.QueryRow(ctx, `
+		SELECT EXTRACT(EPOCH FROM now() - min(created_at))::float8
+		FROM runs WHERE status = 'queued'`).Scan(&seconds)
+	if err != nil {
+		return 0, false, fmt.Errorf("oldest queued age: %w", err)
+	}
+	if seconds == nil {
+		return 0, false, nil
+	}
+	return time.Duration(*seconds * float64(time.Second)), true, nil
 }

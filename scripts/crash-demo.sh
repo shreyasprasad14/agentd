@@ -14,6 +14,9 @@
 #   MODEL          model name                   (default qwen2.5:7b)
 #   LEASE          worker lease duration        (default 5s)
 #   TOOL_DELAY_MS  artificial per-tool delay so the crash window is wide (default 8000)
+#   OTEL_EXPORTER_OTLP_ENDPOINT  where the workers send spans (default the compose
+#                  Jaeger on localhost:4318; both workers' spans land in the run's
+#                  one trace, which is half of what this demo shows)
 set -euo pipefail
 
 API=${API:-http://localhost:8080}
@@ -22,6 +25,7 @@ MODEL_URL=${MODEL_URL:-http://localhost:11434/v1}
 MODEL=${MODEL:-qwen2.5:7b}
 LEASE=${LEASE:-5s}
 TOOL_DELAY_MS=${TOOL_DELAY_MS:-8000}
+OTLP=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://localhost:4318}
 GOAL=${GOAL:-"A motion was served on 2026-09-03. Use compute_deadline to find the date 30 weekdays later (skip weekends), and then call finish with that date."}
 
 cd "$(dirname "$0")/.."
@@ -29,8 +33,12 @@ bin=$(mktemp -d)/agentd
 go build -o "$bin" ./cmd/agentd
 logdir=$(mktemp -d)
 
-worker() { # name
-  "$bin" work -dsn "$DSN" -lease "$LEASE" -owner "$1" -model-url "$MODEL_URL" -model "$MODEL" -skip-migrate \
+# Each worker gets its own metrics port: both run on this host, and a shared
+# :9091 would leave the second one without a /metrics (it degrades to a
+# warning rather than refusing to start, but the demo wants both).
+worker() { # name metrics-addr
+  "$bin" work -dsn "$DSN" -lease "$LEASE" -owner "$1" -model-url "$MODEL_URL" -model "$MODEL" \
+    -metrics-addr "$2" -otlp-endpoint "$OTLP" -otel-service "agentd-worker-$1" -skip-migrate \
     > "$logdir/$1.log" 2>&1 &
   echo $!
 }
@@ -42,7 +50,7 @@ status() { curl -s "$API/v1/runs/$id" | jq -r '"\(.run.status)  lease_owner=\(.r
 step() { printf '\n\033[1;36m▶ %s\033[0m\n' "$*"; }
 
 step "start worker A (lease $LEASE)"
-A=$(worker worker-a)
+A=$(worker worker-a :9091)
 echo "  pid $A"
 
 step "submit a run with tool_delay_ms=$TOOL_DELAY_MS so each tool call takes a while"
@@ -72,7 +80,7 @@ echo "  run is still: $(status)"
 echo "  (the dead worker's lease is left behind; it expires in $LEASE)"
 
 step "start worker B"
-B=$(worker worker-b)
+B=$(worker worker-b :9092)
 echo "  pid $B"
 
 step "tail the stream from where we left off"
@@ -87,5 +95,23 @@ echo
 echo "worker B log ($logdir/worker-b.log):"
 jq -r 'select(.msg=="resuming run") | "  resuming run \(.run_id) from \(.events) events (last: \(.last_type))"' \
   "$logdir/worker-b.log" 2>/dev/null || true
+
+# Both workers' spans are in one trace, because the trace id lives on the run
+# row rather than in a context neither the queue nor the kill -9 survives
+# (ADR-24). The gap where worker A's attempt span should be *is* the crash:
+# the process died before it could end that span, so it was never exported,
+# while the children it had already finished were.
+trace=$(curl -s "$API/v1/runs/$id/trace" | jq -r '.url // empty')
+if [[ -n "$trace" ]]; then
+  step "one trace, both workers"
+  echo "  $trace"
+else
+  step "no trace for this run"
+  echo "  the API was started without -otlp-endpoint; bring the stack up with 'make up' to get one"
+fi
+
+echo
+echo "counters: worker A http://localhost:9091/metrics, worker B http://localhost:9092/metrics"
+echo "  agentd_runs_claimed_total{resumed=\"true\"} on B is this hand-off"
 
 kill "$B" 2>/dev/null || true

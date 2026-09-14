@@ -28,6 +28,19 @@ services:
       - "4317:4317"    # OTLP gRPC
       - "4318:4318"    # OTLP HTTP
 
+  # Scrapes both processes so the counters are something to look at rather
+  # than a text endpoint nobody opens. Cut this service and everything still
+  # works: /metrics is served either way.
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=6h
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+
   api:
     build:
       context: ..
@@ -36,8 +49,17 @@ services:
     environment:
       AGENTD_DSN: postgres://agentd:agentd@postgres:5432/agentd?sslmode=disable
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+      AGENTD_JAEGER_UI: ${AGENTD_JAEGER_UI:-http://localhost:16686}
     ports:
       - "8080:8080"
+    # The binary probes itself: the runtime image is distroless, so there is
+    # no curl and no shell to run one from.
+    healthcheck:
+      test: ["CMD", "/agentd", "healthz", "-addr", "localhost:8080"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
     depends_on:
       postgres:
         condition: service_healthy
@@ -77,6 +99,21 @@ services:
       AGENTD_ANTHROPIC_PRICES: ${AGENTD_ANTHROPIC_PRICES:-}
       AGENTD_ANTHROPIC_THINKING_DISPLAY: ${AGENTD_ANTHROPIC_THINKING_DISPLAY:-}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+      AGENTD_METRICS_ADDR: ${AGENTD_METRICS_ADDR:-:9091}
+      AGENTD_CANCEL_POLL: ${AGENTD_CANCEL_POLL:-1s}
+    # Deliberately no host port on the left: spec §2's lease demo runs
+    # `docker compose up --scale worker=2`, and a fixed host port collides on
+    # the second replica. Compose assigns an ephemeral one per replica, which
+    # `docker compose port worker 9091` resolves when a human needs it, while
+    # Prometheus scrapes the container port over the compose network.
+    ports:
+      - "9091"
+    healthcheck:
+      test: ["CMD", "/agentd", "healthz", "-addr", "localhost:9091"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     extra_hosts:
