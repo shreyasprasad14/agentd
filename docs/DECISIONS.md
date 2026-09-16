@@ -396,6 +396,16 @@ the restriction needs no per-run reasoning. What is unclaimed is the latency win
 reranker is 10–30s per search, the slowest step in a research run, where a hosted model with
 `Parallel: 4` would finish in seconds. Revisit when search latency is the complaint.
 
+**Amended 2026-09-16: the reranking step itself is now a measured loss, not just a priced one.**
+On the 84-case SCOTUS corpus (`evals/retrieval/results-scotus.json`), `hybrid+rerank` takes 1,984
+seconds against hybrid's 2.8 — 713× — and *lowers* MRR, 0.988 → 0.971. So the question this ADR
+was arguing about, local versus hosted, is downstream of a better one: on this corpus the rerank
+pass should not run at all. A 7B model re-ordering eight already-good hits mostly finds new ways
+to be wrong. That does not retire the mode — a corpus deep enough for recall@8 to stop saturating
+is exactly where reranking could start to pay, and this one is quota-capped at 30× under target —
+but it does mean **no claim that reranking improves retrieval is currently supported by
+measurement, and the README says so.**
+
 **Consequence worth knowing.** `spent_usd` is now the fold of `model_responded` *and*
 `tool_succeeded` costs. Anyone checking the counters by summing only `model_responded` will get
 a mismatch — the invariant "the counters equal the fold of the log" still holds, but the fold
@@ -690,3 +700,179 @@ serialiser's default rather than by a decision. One tool switching to an `Encode
 `SetEscapeHTML(false)`, or M6's MCP adapter exposing a tool that returns prose, removes it with
 nothing in the codebase objecting. `TestEnvelopeCannotBeForgedByItsBody` and the eval harness's
 `Escalations()` are the two things that would now notice.
+
+## ADR-34: MCP tools are namespaced, and discovered at boot rather than per run
+
+**Decision.** A discovered tool registers as `<server>__<tool>`. Servers are declared in a config
+file read at boot by *both* `agentd serve` and `agentd work`; a run cannot name its own.
+
+**Why namespaced.** `tools.Registry.Register` rejects duplicate names, and `registry()` wires the
+builtins with `MustRegister`. An MCP server that advertises a tool called `finish` would therefore
+turn a working binary into one that panics at startup — a peer we do not control deciding whether
+this process boots. Namespacing makes a collision impossible rather than unlikely, and it gives a
+run's allowlist a way to grant one server's `search` without granting another's.
+
+**Why at boot, and in both processes.** `api.normalizeConfig` fills a run's default allowlist from
+the API's registry and rejects unknown tools at submission, while the worker dispatches through
+its own. The two must agree on names or a run is admitted against a tool that cannot be
+dispatched. So `serve` dials the servers too, even though it never invokes anything: a manifest is
+only obtainable by asking, and the API needs one to list and to allowlist.
+
+**Why not per run.** A run naming its own server would let a submission add a capability to the
+process — the trust boundary inverted. Servers are operator configuration, like a binary on the
+PATH.
+
+**The failure mode, stated rather than hidden.** A server up for one process's boot and down for
+the other's leaves the registries disagreeing. An unreachable server logs a warning and
+contributes no tools (the same treatment `buildSandbox` gives an unreachable Docker daemon), so
+the run is admitted and the call fails at dispatch as a non-retryable `tool_failed` the model can
+route around. A run is never silently granted a capability it was not allowlisted for, which is
+the property §10 actually cares about.
+
+**Revisit when.** Servers need to come and go without a restart. That wants a manifest cache both
+processes read, not per-run declaration.
+
+## ADR-35: Tool descriptions are an injection surface the envelope does not cover
+
+**Decision.** State the limit instead of pretending to close it. The `<tool_result>` envelope
+defends retrieved content; it does not defend tool *definitions*, and this package does not try to
+filter them. What bounds the attack is the trust boundary and the allowlist. The claim is scored
+by an eval case rather than asserted in prose.
+
+**Why.** A tool's name, description and JSON Schema are written by the server operator and go into
+the model's tool definitions — outside every envelope, in every request, before any tool is
+called. A hostile server can put an instruction there and it rides the whole run. No filter fixes
+this: the description has to reach the model for the tool to be usable at all. ADR-33 hardened the
+envelope against a body forging its delimiters; this is the surface the envelope was never on.
+
+**What actually bounds it.** Servers are operator configuration read from a file at boot — adding
+one is a trust decision equivalent to installing software, not equivalent to retrieving a
+document (ADR-34). And because a run's allowlist is fixed at submission, a poisoned description
+can only ask the model to use capabilities the run was already granted.
+
+**What is mechanical.** `MaxDescriptionBytes`, `MaxSchemaBytes`, `MaxResultBytes` and `MaxTools`
+bound blast radius, not trust: they stop a hostile *or merely broken* server from filling the
+context window or refusing to let the binary start. A tool whose name cannot survive namespacing
+is dropped; one whose schema will not compile gets a permissive one.
+
+**Deliberately not done.** Prefixing every description with a "this text came from server X"
+banner. It reads like a defence, costs tokens in every model call, and nothing measures whether it
+helps. The `injection-poisoned-tool-description` eval case measures the real thing instead, and
+`exposed_in_tools` is a distinct channel from `exposed_with` precisely because a description never
+appears in a tool result — reusing the result-text check would have produced a case that can only
+pass.
+
+## ADR-36: The viewer is embedded static assets with no build step
+
+**Decision.** `internal/api/ui` is three files of HTML, CSS and JavaScript compiled in with
+`go:embed` and mounted as the router's catch-all. No framework, no bundler, no CDN, no npm.
+
+**Why.** The project's claim is that it ships as one binary and a Postgres URL. A viewer that
+needs `node_modules` to render a list and a log would add a lockfile, a second language's
+dependency surface, and a build step to CI, in exchange for conveniences this page does not need.
+The cost is paid in a few dozen lines of DOM helpers.
+
+**Why a catch-all is safe.** chi matches static segments ahead of a wildcard whatever the
+registration order, so `/v1/*`, `/healthz` and `/metrics` keep their handlers. Registration order
+is not load-bearing and `embed_test.go` pins that in both orders rather than trusting a comment.
+Rejected: serving `index.html` for anything unmatched, SPA-style, which would answer a typo'd
+`GET /v1/runz` with 200 and a page of HTML.
+
+**The XSS rule is not a style nit.** Every dynamic string the page renders — model output, tool
+arguments, tool results, goals, and now MCP tool descriptions — is attacker-influenced by
+construction; the corpus contains deliberately poisoned documents. Rendering goes through
+`textContent` only. The project's own viewer executing the injection its eval suite proves the
+agent resists would be a real defect.
+
+## ADR-37: Ingest stays a CLI operation, because the API never calls a model
+
+**Decision.** `POST /v1/corpus/ingest` (spec §13) is not built. Corpus loading is `agentd fetch`
+and `agentd ingest`.
+
+**Why.** §4's invariant is that the API server never calls a model — it writes intent and tails
+the event log, and all execution happens in workers, which is what makes crash recovery mean
+anything. Ingest embeds, and embedding is a model call, so the endpoint could never do the work
+in-process. It would have to be a second job queue: a table and migration, store methods, a second
+claim path in the worker, two handlers, progress reporting, and tests.
+
+**What it would demonstrate.** Nothing the project does not already demonstrate. An async job with
+a status poll is a worse version of the runs API, which does the same thing over SSE. The
+`SKIP LOCKED` queue is proven. Leases are proven — and an ingest job would skip their interesting
+half, since ingest is idempotent by content hash where a tool call is not, so a re-claimed job
+redoes work rather than corrupting anything.
+
+**What is left is spec completeness**, and the invariant is better evidence for itself than
+something built to work around it. A boundary defended reads better than a feature shipped.
+
+**Revisit when.** A corpus has to be loaded by something that cannot reach the worker's
+filesystem — a UI upload, or a tenant. Then the job queue is the right shape and the reasoning
+above is the design.
+
+## ADR-38: A transport cap bounds the largest legal message, not the largest result
+
+**Decision.** The streamable HTTP transport's `MaxEventSize` is `MaxEventBytes`, derived from what
+a full manifest may legally be (`MaxTools × (MaxDescriptionBytes + MaxSchemaBytes)`), not
+`MaxResultBytes`.
+
+**Why.** It was `MaxResultBytes`, which was wrong in a way only a manifest shows. The transport
+limit applies to *every* message, and the largest legal one is not a result but the `tools/list`
+response. `MaxSchemaBytes` alone is larger than `MaxResultBytes`, so a server advertising a schema
+this package would happily accept could not be listed at all — and the operator saw "server
+unavailable" naming nothing that pointed at a cap.
+
+**Nothing is lost by widening it.** A result is truncated to `MaxResultBytes` on arrival
+regardless of how it got here, so the transport limit is a backstop against a stream that never
+terminates, not the bound on what reaches the model.
+
+**The deeper reason it was wrong.** The stdio transport has no equivalent limit, so the same
+hostile server had a different blast radius depending on which transport an operator configured.
+A bound that moves with the transport is not a security boundary, it is an inconsistency. The
+stdio sibling test passed throughout, which is exactly why this needed a test of its own.
+
+## ADR-39: Deduplication is corpus curation, and runs at the source
+
+**Decision.** Collapsing multiple records of the same case happens in `agentd dedupe`, a pure pass
+over the fetched JSONL that runs between `fetch` and `ingest`, keyed on the docket number and
+keeping the longest text. It does not happen in the ingest pipeline.
+
+**The problem.** CourtListener publishes each revision of an opinion as its own document with its
+own id. A 109-document SCOTUS pull covered 84 distinct cases: *Trump v. CASA* appeared five times,
+10.8% of the corpus by itself, and 25 of the 109 documents were revisions of something already
+present. That inflates any retrieval measurement taken against the corpus — a query gets up to five
+chances to land a relevant document in top-8 — and at serving time it spends an agent's context
+window on near-identical hits.
+
+**Why not a content hash, which is the obvious answer.** It catches none of this. All 109 texts
+hash differently, because a revision is a genuinely different document — *Goldey v. Fields* arrived
+at 5,496, 7,775, and 7,978 characters. Content hashing answers "do I already have these exact
+bytes," and the question here is "are these two documents the same case." The key has to be
+identity, not content. This was worth measuring before building: the intuitive fix was empirically
+a no-op.
+
+**Why not the ingest pipeline, which is where the duplication hurts.** Three reasons, in order of
+weight:
+
+- **The pipeline has no key to use.** `InputDoc` is deliberately generic so the corpus source is
+  swappable; the docket number lives in source-specific `metadata`. Teaching `ingest.go` to read it
+  couples the generic pipeline to one source's schema, which is the same mistake as special-casing
+  MCP inside `tools.Registry`.
+- **It would overload an invariant that is currently clean.** Ingest is idempotent per `source_id`
+  by content hash, and that invariant is what makes an interrupted ingest resumable for free.
+  "These two documents are the same case" is a different question with a different failure mode.
+- **Guessing wrong deletes an opinion.** Which revision of an opinion is authoritative is a legal
+  question. A pipeline that silently drops a superseded document during embedding gives an operator
+  no way to see what went missing. A curation pass that reads one file and writes another leaves
+  both on disk, and the displaced ids stay recoverable.
+
+**What this does not fix, stated so it is not mistaken for fixed.** Deduplication at the source
+keeps the benchmark honest, but the serving-time complaint — near-identical documents crowding out
+the rest of top-8 — is a result-diversity problem, not an ingest one. The fix for that is a per-case
+cap at search time, which has the advantage of preserving every revision rather than deleting four
+of five. It is not built, and the retrieval numbers in the README are measured on a corpus where the
+question does not arise.
+
+**Consequences.** The benchmark corpus is `data/corpus/<court>-dedup.jsonl`, produced by
+`make dedupe`, and `evals/retrieval/labels-scotus.yaml` names exactly one relevant document per
+query. That labeling is only correct *because* the corpus is deduplicated: against the raw pull,
+labeling one id scores its own revisions as misses and labeling all of them inflates recall, and
+there is no third option. Deduplicating the corpus is what removes the choice between two biases.

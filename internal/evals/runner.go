@@ -377,6 +377,13 @@ func (r *Runner) collect(ctx context.Context, runID uuid.UUID, elapsed time.Dura
 	if err != nil {
 		return nil, fmt.Errorf("the run's log does not reduce: %w", err)
 	}
+	// What the model was told its tools are. It comes from the registry rather
+	// than the log, which records the allowlist by name only, and it is a
+	// second exposure channel rather than more of the first: a poisoned tool
+	// description never appears in a tool result (ADR-35).
+	if r.cfg.Registry != nil {
+		ev.DescribeTools(r.cfg.Registry.Defs(ev.State.Config.Tools))
+	}
 	return ev, nil
 }
 

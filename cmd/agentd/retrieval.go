@@ -177,6 +177,74 @@ func fetchCmd(ctx context.Context, args []string) error {
 	return err
 }
 
+// dedupeCmd collapses revisions of the same case in a fetched JSONL file,
+// writing a new file rather than editing one in place: the displaced ids stay
+// recoverable from the input, and the corpus a measurement ran against stays
+// on disk next to the one it was derived from. It runs between fetch and
+// ingest because deduplication is corpus curation and ingest is a pipeline —
+// see ADR-39 and the package comment on retrieval.Dedupe.
+func dedupeCmd(_ context.Context, args []string) error {
+	fs := flag.NewFlagSet("dedupe", flag.ExitOnError)
+	in := fs.String("in", "", "input JSONL from `agentd fetch` (required)")
+	out := fs.String("out", "", "output JSONL path (default <in>-dedup.jsonl)")
+	key := fs.String("key", "docket_number", "metadata field identifying the case; documents lacking it group by normalized title")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *in == "" {
+		return fmt.Errorf("-in is required")
+	}
+	outPath := *out
+	if outPath == "" {
+		outPath = strings.TrimSuffix(*in, ".jsonl") + "-dedup.jsonl"
+	}
+	if outPath == *in {
+		return fmt.Errorf("-out must differ from -in: dedupe never edits a corpus in place")
+	}
+	log := newLogger("dedupe")
+
+	f, err := os.Open(*in)
+	if err != nil {
+		return err
+	}
+	docs, err := retrieval.ReadJSONL(f)
+	f.Close()
+	if err != nil {
+		return err
+	}
+
+	kept, sum := retrieval.Dedupe(docs, retrieval.DedupeOptions{MetadataKey: *key})
+
+	// Write to a temporary file and rename, so an interrupted run cannot leave
+	// a half-written corpus that looks complete to the next ingest.
+	tmp := outPath + ".tmp"
+	wf, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	enc := json.NewEncoder(wf)
+	for _, d := range kept {
+		if err := enc.Encode(d); err != nil {
+			wf.Close()
+			os.Remove(tmp)
+			return err
+		}
+	}
+	if err := wf.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, outPath); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+
+	log.Info("dedupe done", "in", sum.In, "out", sum.Out, "dropped", sum.Dropped,
+		"collapsed_groups", sum.Collapsed, "by_key", sum.ByKey, "by_title", sum.ByTitle,
+		"key", *key, "file", outPath)
+	return nil
+}
+
 // ingestCmd chunks, embeds, and upserts a fetched JSONL file.
 func ingestCmd(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("ingest", flag.ExitOnError)

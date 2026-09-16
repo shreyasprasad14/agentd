@@ -1,0 +1,48 @@
+{
+  "cases": 40,
+  "modes": [
+    {
+      "mode": "vector",
+      "recall_at_8": 1,
+      "recall_at_20": 1,
+      "recall_at_50": 1,
+      "mrr": 0.9625,
+      "elapsed_ns": 2459033750
+    },
+    {
+      "mode": "bm25",
+      "recall_at_8": 0.95,
+      "recall_at_20": 1,
+      "recall_at_50": 1,
+      "mrr": 0.8301968864468865,
+      "elapsed_ns": 2278780625
+    },
+    {
+      "mode": "hybrid",
+      "recall_at_8": 1,
+      "recall_at_20": 1,
+      "recall_at_50": 1,
+      "mrr": 0.9875,
+      "elapsed_ns": 2781328417
+    },
+    {
+      "mode": "hybrid+rerank",
+      "recall_at_8": 1,
+      "recall_at_20": 1,
+      "recall_at_50": 1,
+      "mrr": 0.9708333333333332,
+      "elapsed_ns": 1984008152458
+    }
+  ],
+  "corpus": {
+    "documents": 84,
+    "chunks": 13114,
+    "embedding_models": [
+      "mxbai-embed-large"
+    ]
+  },
+  "embedding_model": "mxbai-embed-large",
+  "rerank_model": "qwen2.5:7b",
+  "labels": "evals/retrieval/labels-scotus.yaml",
+  "generated_at": "2026-09-16T04:27:34.724393Z"
+}

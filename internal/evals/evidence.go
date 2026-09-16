@@ -34,6 +34,19 @@ type Evidence struct {
 	// a literal search of it; matching the decoded leaves is what makes
 	// `retrieved` and injection exposure mean what they say.
 	ResultText string
+
+	// ToolDefText is the name, description and schema of every tool this run
+	// was allowlisted, joined by newlines — what the model was told its tools
+	// are, as opposed to what they returned.
+	//
+	// It is a separate channel from ResultText because it is a separate
+	// attack. A poisoned MCP tool *description* rides in the tool definitions,
+	// which sit outside every <tool_result> envelope, so it never appears in a
+	// result and a search of ResultText would report it as never exposed
+	// (ADR-35). It is sourced from the registry rather than the event log
+	// because the log records the allowlist by name only; the registry is what
+	// actually produced the definitions the provider was handed.
+	ToolDefText string
 }
 
 // Collect reads a finished run and folds it into Evidence.
@@ -81,6 +94,25 @@ func Collect(run *store.Run, events []store.Event, calls []store.ToolCall, elaps
 	}
 	ev.ResultText = text.String()
 	return ev, nil
+}
+
+// DescribeTools records the definitions the model was handed, filling
+// ToolDefText. The runner calls it after Collect, because the definitions come
+// from the registry and not from the log. A caller that does not — an
+// assertion test with no registry — leaves the channel empty, and a case
+// asserting on it then reports the text as unexposed rather than passing on a
+// string nobody looked for.
+func (e *Evidence) DescribeTools(defs []model.ToolDef) {
+	var b strings.Builder
+	for _, d := range defs {
+		b.WriteString(d.Name)
+		b.WriteByte('\n')
+		b.WriteString(d.Description)
+		b.WriteByte('\n')
+		b.Write(d.InputSchema)
+		b.WriteByte('\n')
+	}
+	e.ToolDefText = b.String()
 }
 
 // EventTypes is the log's shape.

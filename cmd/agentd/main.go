@@ -64,6 +64,8 @@ func run() error {
 		return migrate(ctx, os.Args[2:])
 	case "fetch":
 		return fetchCmd(ctx, os.Args[2:])
+	case "dedupe":
+		return dedupeCmd(ctx, os.Args[2:])
 	case "ingest":
 		return ingestCmd(ctx, os.Args[2:])
 	case "eval":
@@ -87,6 +89,7 @@ commands:
   work      run a queue worker that executes claimed runs
   migrate   apply database migrations and exit
   fetch     pull court opinions from CourtListener into a JSONL corpus file
+  dedupe    collapse revisions of the same case in a corpus file (run before ingest)
   ingest    chunk, embed, and upsert a fetched corpus into Postgres
   eval      run an eval suite (eval retrieval | eval suite | eval record)
   healthz   probe a serve or work process's /healthz and exit 0 or 1
@@ -110,6 +113,7 @@ func serve(ctx context.Context, args []string) error {
 	poll := fs.Duration("sse-poll", 200*time.Millisecond, "SSE event tail poll interval")
 	jaegerUI := fs.String("jaeger-ui", envOr("AGENTD_JAEGER_UI", api.DefaultJaegerUI),
 		"browser-facing Jaeger base URL that GET /v1/runs/:id/trace links into")
+	mf := addMCPFlag(fs)
 	tf := addTraceFlags(fs, "agentd-api")
 	skipMigrate := fs.Bool("skip-migrate", false, "do not apply migrations at startup")
 	if err := fs.Parse(args); err != nil {
@@ -129,11 +133,22 @@ func serve(ctx context.Context, args []string) error {
 	}
 	defer st.Close()
 
+	// serve holds no sandbox, embedder or store handle, so its registry lists
+	// and allowlists tools it cannot run. MCP is the exception it still has to
+	// dial: the manifest is only obtainable from the server.
+	mcpTools, mcpClose, err := mf.connect(ctx, log)
+	if err != nil {
+		return err
+	}
+	defer mcpClose.Close()
+	reg := registry(nil, sandbox.DefaultLimits(), nil, nil)
+	registerMCP(reg, mcpTools, log)
+
 	// The API serves /metrics on its own listener, and NewServer registers
 	// the Postgres-backed run gauges against this registry (ADR-26).
 	srv := api.NewServer(st, log, api.Options{
 		PollInterval: *poll,
-		Registry:     registry(nil, sandbox.DefaultLimits(), nil, nil),
+		Registry:     reg,
 		Tracer:       tel.Tracer(),
 		JaegerUI:     *jaegerUI,
 		Metrics:      telemetry.NewMetrics(),
@@ -161,6 +176,7 @@ func work(ctx context.Context, args []string) error {
 	sandboxMaxTimeout := fs.Duration("sandbox-max-timeout", envDurationOr("AGENTD_SANDBOX_MAX_TIMEOUT", sandbox.DefaultLimits().MaxTimeout), "the most a tool call may ask for via timeout_seconds")
 	cancelPoll := fs.Duration("cancel-poll", envDurationOr("AGENTD_CANCEL_POLL", runtime.DefaultCancelPoll),
 		"how often a running run's cancel flag is checked; the floor on cancel latency (ADR-25)")
+	mf := addMCPFlag(fs)
 	ef := addEmbedFlags(fs)
 	rf := addRerankFlags(fs)
 	tf := addTraceFlags(fs, "agentd-worker")
@@ -220,13 +236,25 @@ func work(ctx context.Context, args []string) error {
 		Store: st, Embedder: embedder, Reranker: reranker,
 		RerankCandidates: *rf.candidates, Log: log, Tracer: tel.Tracer(), Metrics: metrics,
 	}
+	// Dialed after the store so a config typo is reported before anything
+	// spawns a subprocess, and deferred immediately so every path out of this
+	// function past here reaps the stdio children. A worker that returns an
+	// error without closing them leaks one process per configured server.
+	mcpTools, mcpClose, err := mf.connect(ctx, log)
+	if err != nil {
+		return err
+	}
+	defer mcpClose.Close()
+	reg := registry(exec, exec.Limits(), searcher, st)
+	registerMCP(reg, mcpTools, log)
+
 	w := runtime.NewWorker(st, log, runtime.WorkerConfig{
 		Owner:          *owner,
 		PollInterval:   *poll,
 		LeaseDuration:  *lease,
 		ReaperInterval: *reaper,
 		Provider:       provider,
-		Registry:       registry(exec, exec.Limits(), searcher, st),
+		Registry:       reg,
 		DefaultModel:   *modelName,
 		CancelPoll:     *cancelPoll,
 		Tracer:         tel.Tracer(),

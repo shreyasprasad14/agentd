@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
 
+	"github.com/shreyasprasad/agentd/internal/api/ui"
 	"github.com/shreyasprasad/agentd/internal/runtime"
 	"github.com/shreyasprasad/agentd/internal/store"
 	"github.com/shreyasprasad/agentd/internal/telemetry"
@@ -142,6 +144,7 @@ func (s *Server) Router() http.Handler {
 	r.Get("/v1/tools", s.listTools)
 	r.Route("/v1/runs", func(r chi.Router) {
 		r.Post("/", s.createRun)
+		r.Get("/", s.listRuns)
 		r.Get("/{id}", s.getRun)
 		r.Get("/{id}/events", s.listEvents)
 		r.Get("/{id}/stream", s.streamRun)
@@ -149,6 +152,11 @@ func (s *Server) Router() http.Handler {
 		r.Post("/{id}/cancel", s.cancelRun)
 		r.Post("/{id}/resume", s.resumeRun)
 	})
+	// Last, so the viewer's catch-all reads as the fallback it is. chi matches
+	// static segments ahead of a wildcard regardless of registration order, so
+	// this does not shadow anything above it (ui.Mount documents that, and
+	// ui's own test pins it in both orders).
+	ui.Mount(r)
 	return r
 }
 
@@ -438,6 +446,46 @@ func (s *Server) listTools(w http.ResponseWriter, r *http.Request) {
 		out = append(out, ToolInfo{Name: t.Name(), Description: t.Description(), TrustTier: t.TrustTier(), Schema: t.Schema()})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"tools": out})
+}
+
+// listRuns serves GET /v1/runs, the newest runs first, optionally narrowed to
+// one status. It exists for the viewer, which would otherwise open on a box
+// wanting a run id pasted into it.
+//
+// An unknown ?status= is rejected here rather than in the store, which matches
+// nothing for one instead (see store.ListRuns). The two answers are both
+// defensible and the difference is who is asking: a caller that typo'd a status
+// is a client bug worth naming, and an empty list would read as "no runs are
+// queued" rather than "queued is not spelled that way".
+func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {
+	opts := store.ListRunsOptions{Status: r.URL.Query().Get("status")}
+	if opts.Status != "" && !slices.Contains(runtime.Statuses(), opts.Status) {
+		writeError(w, http.StatusBadRequest,
+			"unknown status "+strconv.Quote(opts.Status)+"; want one of "+strings.Join(runtime.Statuses(), ", "))
+		return
+	}
+	// An unparseable limit is a client bug for the same reason. Out-of-range
+	// values are not: the store clamps to MaxRunLimit, so asking for too much
+	// gets the most it may have.
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "limit must be an integer")
+			return
+		}
+		opts.Limit = n
+	}
+
+	runs, err := s.store.ListRuns(r.Context(), opts)
+	if err != nil {
+		s.log.Error("list runs", "error", err)
+		writeError(w, http.StatusInternalServerError, "could not list runs")
+		return
+	}
+	if runs == nil {
+		runs = []store.Run{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"runs": runs})
 }
 
 func (s *Server) listEvents(w http.ResponseWriter, r *http.Request) {

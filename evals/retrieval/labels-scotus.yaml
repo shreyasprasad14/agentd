@@ -1,0 +1,164 @@
+# Hand-labeled retrieval queries for the real CourtListener corpus.
+#
+# 84 distinct SCOTUS cases, one document each. evals/retrieval/labels.yaml is
+# the 12-opinion smoke fixture that runs anywhere in seconds and saturates;
+# this is the set that discriminates between the four modes.
+#
+# METHOD. Cases were picked off the corpus listing by id, and each query was
+# written from that opinion's own syllabus — never from search results. That
+# ordering is the anti-bias rule in labels.yaml, and it matters far more at
+# this scale than at 48 chunks: a query written by reading what already ranks
+# first measures the ranker against itself.
+#
+# CAVEAT, stated because the table is worth less without it: these queries were
+# written by a language model, not by a lawyer. They are faithful to the
+# syllabus each was drawn from, and phrased as an agent would ask rather than as
+# keywords — which is the shape that exposed the websearch_to_tsquery AND-
+# semantics bug. But a model wrote them, and the system being scored is the same
+# kind of system. Treat this as a well-constructed benchmark, not as a human-
+# labeled gold set.
+#
+# DUPLICATES, and why the corpus is 84 documents and not 109. CourtListener
+# returns each revision of an opinion as its own document with its own id: the
+# 109 fetched documents covered only 84 cases, and Trump v. CASA appeared five
+# times — 10.8% of the corpus by itself. Deduplication happens at the source
+# (see `agentd fetch -dedupe`, ADR-39) rather than in the ingest pipeline,
+# keyed on the docket number, keeping the longest text per docket. Note that
+# content-hash deduplication would not have caught any of it: all 109 texts
+# differ, because a revision is a genuinely different document.
+#
+# With one document per case, exactly one document is relevant per query. The
+# earlier version of this file listed every duplicate id as relevant, which gave
+# a query up to five chances to land in top-8 and inflated recall; labeling a
+# single id against the duplicated corpus would have scored the copies as
+# misses and deflated it. Deduplicating the corpus is what makes one-relevant-
+# doc-per-query the correct labeling rather than a choice between two biases.
+#
+# Thresholds are the same 0.70 recall@8 the fixture uses, set before the first
+# run rather than fitted to the numbers it produced.
+
+thresholds:
+  hybrid: {recall_at_8: 0.70}
+  hybrid_rerank: {recall_at_8: 0.70}
+
+cases:
+  - query: "may a State get a stay of an order requiring it to redraw congressional districts under section 2 of the Voting Rights Act"
+    relevant:
+      - {source_id: "clop-11336479"}   # Allen v. Milligan (No. 25A1314)
+  - query: "can a defendant be punished under both subsections of the firearm statute for a single use of a gun during a crime"
+    relevant:
+      - {source_id: "clop-11240827"}   # Barrett v. United States (No. 24-5774)
+  - query: "must a federal court sitting in diversity apply a state law requiring an expert affidavit of merit before a malpractice suit proceeds"
+    relevant:
+      - {source_id: "clop-11243340"}   # Berk v. Choy (No. 24-440)
+  - query: "do candidates have standing to challenge a state law counting mail-in ballots that arrive after election day"
+    relevant:
+      - {source_id: "clop-11240921"}   # Bost v. Illinois Bd. of Elections (No. 24-568)
+  - query: "what limits apply to a second or successive motion to vacate a federal sentence"
+    relevant:
+      - {source_id: "clop-11239035"}   # Bowe v. United States (No. 24-5438)
+  - query: "when may police enter a home without a warrant to render emergency aid to an occupant"
+    relevant:
+      - {source_id: "clop-11240920"}   # Case v. Montana (No. 24-624)
+  - query: "does obtaining location data from a geofence warrant covering everyone near a robbery violate the Fourth Amendment"
+    relevant:
+      - {source_id: "clop-11349205"}   # Chatrie v. United States (No. 25-112)
+  - query: "when can a private company remove a state lawsuit to federal court under the federal officer removal statute"
+    relevant:
+      - {source_id: "clop-11311922"}   # Chevron USA Inc. v. Plaquemines Parish (No. 24-813)
+  - query: "does a state ban on conversion therapy for minors regulate professional conduct or restrict a counselor's speech"
+    relevant:
+      - {source_id: "clop-11297434"}   # Chiles v. Salazar (No. 24-539)
+  - query: "can a technology company be held liable for aiding and abetting human rights abuses committed by a foreign government"
+    relevant:
+      - {source_id: "clop-11346054"}   # Cisco Systems, Inc. v. Doe (No. 24-856)
+  - query: "when is an internet service provider contributorily liable for subscribers who infringe copyrights"
+    relevant:
+      - {source_id: "clop-11281536"}   # Cox Communications, Inc. v. Sony Music Entertainment (No. 24-171)
+  - query: "do fuel producers have standing to challenge EPA approval of state electric vehicle mandates"
+    relevant:
+      - {source_id: "clop-11243417"}   # Diamond Alternative Energy, LLC v. EPA (No. 24-7)
+  - query: "is criminal restitution under the Mandatory Victims Restitution Act punishment subject to the Ex Post Facto Clause"
+    relevant:
+      - {source_id: "clop-11243338"}   # Ellingburg v. United States (No. 24-482)
+  - query: "may a district court excuse a defendant missing the thirty day deadline to remove a case to federal court"
+    relevant:
+      - {source_id: "clop-11314034"}   # Enbridge Energy, LP v. Nessel (No. 24-783)
+  - query: "may a court consider retribution when deciding whether to revoke supervised release and impose prison"
+    relevant:
+      - {source_id: "clop-11243416"}   # Esteras v. United States (No. 23-7483)
+  - query: "can a company sue Cuban state owned enterprises that profit from an oil refinery confiscated after the revolution"
+    relevant:
+      - {source_id: "clop-11346053"}   # Exxon Mobil Corp. v. Corporación Cimex, S. A. (Cuba) (No. 24-699)
+  - query: "may the FCC impose monetary forfeitures on carriers for mishandling customer location data without a jury trial"
+    relevant:
+      - {source_id: "clop-11337518"}   # FCC v. AT&T (No. 25-406)
+  - query: "is the universal service contribution scheme an unconstitutional delegation of taxing power"
+    relevant:
+      - {source_id: "clop-11243407"}   # FCC v. Consumers' Research (No. 24-354)
+  - query: "where may a retailer challenge the FDA order denying approval to market an e-cigarette product"
+    relevant:
+      - {source_id: "clop-11243415"}   # FDA v. R. J. Reynolds Vapor Co. (No. 23-1187)
+  - query: "when may a religious nonprofit challenge a state attorney general subpoena in federal court"
+    relevant:
+      - {source_id: "clop-11317513"}   # First Choice Women's Resource Centers, Inc. v. Davenport (No. 24-781)
+  - query: "is a delivery driver who never crosses state lines exempt from the Federal Arbitration Act as a transportation worker"
+    relevant:
+      - {source_id: "clop-11332974"}   # Flowers Foods, Inc. v. Brock (No. 24-935)
+  - query: "does requiring age verification to access sexually explicit websites violate adults First Amendment rights"
+    relevant:
+      - {source_id: "clop-11243406"}   # Free Speech Coalition, Inc. v. Paxton (No. 23-1122)
+  - query: "does the Investment Company Act give private parties an implied right to sue to rescind a contract"
+    relevant:
+      - {source_id: "clop-11341135"}   # FS Credit Opportunities Corp. v. Saba Capital Master Fund, Ltd. (No. 24-345)
+  - query: "is a state transit corporation entitled to sovereign immunity from suit in another state's courts"
+    relevant:
+      - {source_id: "clop-11270334"}   # Galette v. New Jersey Transit Corp. (No. 24-1021)
+  - query: "can a private detention contractor claim derivative sovereign immunity for its detainee work policies"
+    relevant:
+      - {source_id: "clop-11266870"}   # Geo Group, Inc. v. Menocal (No. 24-758)
+  - query: "does a death row prisoner have standing to sue for DNA testing that would not itself prove innocence"
+    relevant:
+      - {source_id: "clop-11243411"}   # Gutierrez v. Saenz (No. 23-7809)
+  - query: "what happens on appeal when a case was removed to federal court based on improper joinder of a nondiverse defendant"
+    relevant:
+      - {source_id: "clop-11266326"}   # Hain Celestial Group, Inc. v. Palmquist (No. 24-724)
+  - query: "can the holder of a dock concession that expired before the lawsuit recover under the Helms-Burton Act for trafficking"
+    relevant:
+      - {source_id: "clop-11330193"}   # Havana Docks Corp. v. Royal Caribbean Cruises, Ltd. (No. 24-983)
+  - query: "may a soldier sue a military contractor whose negligent supervision allowed an employee to bomb a base"
+    relevant:
+      - {source_id: "clop-11314033"}   # Hencely v. Fluor Corp. (No. 24-924)
+  - query: "does the First Step Act apply to a defendant being resentenced after his original firearm sentence was vacated"
+    relevant:
+      - {source_id: "clop-11243410"}   # Hewitt v. United States (No. 23-1002)
+  - query: "when does a generic drug maker induce patent infringement by marketing under a skinny label"
+    relevant:
+      - {source_id: "clop-11337517"}   # Hikma Pharmaceuticals USA Inc. v. Amarin Pharma, Inc. (No. 24-889)
+  - query: "is the government bound by its promise not to prosecute conduct described in a plea agreement"
+    relevant:
+      - {source_id: "clop-11344436"}   # Hunter v. United States (No. 24-1063)
+  - query: "does a federal court that stayed claims for arbitration keep jurisdiction to confirm or vacate the award"
+    relevant:
+      - {source_id: "clop-11326163"}   # Jules v. Andre Balazs Properties (No. 25-83)
+  - query: "may a court bar a claim because the plaintiff failed to disclose it on his bankruptcy schedules"
+    relevant:
+      - {source_id: "clop-11341134"}   # Keathley v. Buddy Ayers Construction, Inc. (No. 25-6)
+  - query: "are members of the Preventive Services Task Force principal officers who must be appointed by the President"
+    relevant:
+      - {source_id: "clop-11243405"}   # Kennedy v. Braidwood Management, Inc. (No. 24-316)
+  - query: "may a prisoner recover money damages from officials individually under RLUIPA for cutting his religious dreadlocks"
+    relevant:
+      - {source_id: "clop-11347209"}   # Landor v. Louisiana Dept of Corrections and Public Safety (No. 23-1197)
+  - query: "does the International Emergency Economic Powers Act authorize the President to impose tariffs"
+    relevant:
+      - {source_id: "clop-11263492"}   # Learning Resources, Inc. v. Trump (No. 24-1287)
+  - query: "is a congressional map drawn to comply with the Voting Rights Act an unconstitutional racial gerrymander"
+    relevant:
+      - {source_id: "clop-11320154"}   # Louisiana v. Callais (No. 24-109)
+  - query: "may parents opt their children out of public school storybook lessons that burden their religious beliefs"
+    relevant:
+      - {source_id: "clop-11243404"}   # Mahmoud v. Taylor (No. 24-297)
+  - query: "can a Medicaid patient sue under section 1983 to enforce the any qualified provider requirement"
+    relevant:
+      - {source_id: "clop-11243409"}   # Medina v. Planned Parenthood South Atlantic (No. 23-1275)

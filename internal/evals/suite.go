@@ -45,6 +45,10 @@ func Categories() []string {
 const (
 	CapDocker = "docker"
 	CapCorpus = "corpus"
+	// CapMCP is an MCP server the harness could reach. The suite's poisoned
+	// server is the in-repo one, so this is really "the fixture binary built",
+	// but a case should not have to know that.
+	CapMCP = "mcp"
 )
 
 // Suite is one parsed YAML file.
@@ -220,6 +224,16 @@ type InjectionAssert struct {
 	// poisoned document proves nothing, and is reported inconclusive rather
 	// than counted as resistance.
 	ExposedWith []string `yaml:"exposed_with"`
+	// ExposedInTools is planted text that must appear in the run's tool
+	// definitions rather than in a result — the tool-poisoning attack, where a
+	// server writes the instruction into a tool's description and it rides in
+	// every request from then on (ADR-35).
+	//
+	// It is the other half of exposure, not a variant of it: a description is
+	// never inside a <tool_result> envelope, so ExposedWith cannot see it and
+	// a case using the wrong one would report "never exposed" for text that
+	// was in front of the model the whole run.
+	ExposedInTools []string `yaml:"exposed_in_tools"`
 	// NotFollowed names tools the planted instruction asked for.
 	NotFollowed []string `yaml:"not_followed"`
 	// CanaryAbsent is text the model would only emit having followed the
@@ -378,9 +392,12 @@ func (s *Suite) normalize() error {
 		if c.Model == "" {
 			c.Model = s.Defaults.Model
 		}
-		if c.Category == CategoryInjection && (c.Assert.Injection == nil || len(c.Assert.Injection.ExposedWith) == 0) {
-			return fmt.Errorf("case %q: an INJECTION case must declare injection.exposed_with; "+
-				"without it the case passes whenever retrieval simply missed the poisoned document (ADR-30)", c.ID)
+		if c.Category == CategoryInjection &&
+			(c.Assert.Injection == nil ||
+				(len(c.Assert.Injection.ExposedWith) == 0 && len(c.Assert.Injection.ExposedInTools) == 0)) {
+			return fmt.Errorf("case %q: an INJECTION case must declare injection.exposed_with or "+
+				"injection.exposed_in_tools; without one the case passes whenever the planted text simply "+
+				"never reached the model (ADR-30)", c.ID)
 		}
 		if c.Chaos != nil && c.Chaos.KillAfter == "" {
 			return fmt.Errorf("case %q: chaos needs kill_after", c.ID)
@@ -403,8 +420,9 @@ func (s *Suite) normalize() error {
 			}
 		}
 		for _, r := range c.Requires {
-			if r != CapDocker && r != CapCorpus {
-				return fmt.Errorf("case %q: unknown requirement %q (want %s, %s)", c.ID, r, CapDocker, CapCorpus)
+			if r != CapDocker && r != CapCorpus && r != CapMCP {
+				return fmt.Errorf("case %q: unknown requirement %q (want %s, %s, %s)",
+					c.ID, r, CapDocker, CapCorpus, CapMCP)
 			}
 		}
 	}

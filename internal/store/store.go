@@ -255,6 +255,101 @@ func (s *Store) GetRun(ctx context.Context, id uuid.UUID) (*Run, error) {
 	return scanRun(s.pool.QueryRow(ctx, `SELECT `+runColumns+` FROM runs WHERE id = $1`, id))
 }
 
+// Bounds on a run listing. The default is what an unparameterised listing
+// returns: enough rows to fill a viewer's first screen without making the
+// endpoint's cheapest call its most expensive one. The cap bounds the worst
+// case a caller can ask for, since every row carries the run's whole
+// agent_config and there is no index that satisfies the ordering.
+const (
+	DefaultRunLimit = 50
+	MaxRunLimit     = 200
+)
+
+// ListRunsOptions narrows and bounds ListRuns. The zero value is meaningful:
+// the newest DefaultRunLimit runs, of every status.
+//
+// It is a struct rather than two parameters because a listing is the endpoint
+// most likely to grow filters later (by goal, by trace id, by date), and each
+// one would otherwise be another positional argument that every existing call
+// site has to pass a zero for.
+type ListRunsOptions struct {
+	// Status, when non-empty, keeps only runs in that state. An unrecognised
+	// status matches nothing rather than failing — see ListRuns.
+	Status string
+	// Limit caps the rows returned. Zero or negative means DefaultRunLimit.
+	// Anything larger than MaxRunLimit is clamped rather than rejected: a
+	// caller asking for too much gets the most it may have, which is a more
+	// useful answer than an error it can only respond to by asking again.
+	Limit int
+}
+
+// ListRuns returns runs newest first.
+//
+// It selects runColumns — exactly what GetRun returns — so a run in the list
+// and the same run from GET /v1/runs/:id marshal to identical JSON, and a
+// viewer can render a row without refetching it. The alternative, a trimmed
+// summary row, would save sending agent_config for runs nobody opens; at the
+// scale this endpoint serves, giving the client two shapes of "a run" to
+// reconcile costs more than the bytes do.
+//
+// created_at is not a total order — runs created in the same transaction, or
+// within one clock tick, tie — so id breaks ties. Without a tiebreaker
+// Postgres may return tied rows in a different order each call, which would
+// make the listing flicker under a poll and, once this grows keyset
+// pagination, silently drop or repeat runs at a page boundary.
+//
+// The status filter compares status::text instead of casting the argument to
+// run_status: a value outside the enum then lists nothing, rather than failing
+// the whole query with a cast error the handler would have to translate. The
+// rejected alternative is validating the status in Go, which means keeping a
+// copy of the enum here for a migration to silently desync from. The cast
+// costs nothing in practice because no index covers this ordering anyway.
+//
+// An empty result is a nil slice, as in ListEvents; the API layer is what
+// renders it as [].
+func (s *Store) ListRuns(ctx context.Context, opts ListRunsOptions) ([]Run, error) {
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = DefaultRunLimit
+	}
+	if limit > MaxRunLimit {
+		limit = MaxRunLimit
+	}
+
+	args := []any{limit}
+	where := ""
+	if opts.Status != "" {
+		args = append(args, opts.Status)
+		where = fmt.Sprintf(" WHERE status::text = $%d", len(args))
+	}
+
+	rows, err := s.pool.Query(ctx, `
+		SELECT `+runColumns+` FROM runs`+where+`
+		ORDER BY created_at DESC, id DESC
+		LIMIT $1`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list runs: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Run
+	for rows.Next() {
+		// pgx.Rows satisfies pgx.Row, so the listing scans through the same
+		// scanRun that GetRun uses. That is the point: runColumns and scanRun
+		// have to agree positionally, and a second hand-written scan here
+		// would be a second place for a future column to be forgotten.
+		run, err := scanRun(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan run: %w", err)
+		}
+		out = append(out, *run)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list runs: %w", err)
+	}
+	return out, nil
+}
+
 // withRunLease runs fn inside a transaction that holds the run's row lock and
 // has verified that owner still holds the lease. Every write the worker makes
 // goes through here, so a worker whose lease was stolen (paused, not killed)

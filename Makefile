@@ -13,11 +13,14 @@ SANDBOX_IMAGE ?= agentd/sandbox:python
 COURT ?= scotus
 LIMIT ?= 2500
 CORPUS ?= data/corpus/$(COURT).jsonl
+## CORPUS_DEDUP holds one document per case; it is what the retrieval
+## benchmark measures against. See `make dedupe` and ADR-39.
+CORPUS_DEDUP ?= data/corpus/$(COURT)-dedup.jsonl
 
 JAEGER_UI ?= http://localhost:16686
 PROMETHEUS_UI ?= http://localhost:9090
 
-.PHONY: build test test-short test-sandbox test-retrieval test-live test-live-anthropic up down logs migrate serve work demo demo-anthropic demo-python demo-legal demo-budget demo-cancel compare crash-demo trace metrics model-pull sandbox-build fetch-corpus ingest ingest-fixture eval eval-record eval-live eval-record-live eval-retrieval fmt vet
+.PHONY: build test test-short test-sandbox test-retrieval test-live test-live-anthropic up down logs migrate serve work demo demo-anthropic demo-python demo-legal demo-budget demo-cancel compare crash-demo trace metrics model-pull sandbox-build fetch-corpus dedupe ingest ingest-fixture eval eval-record eval-live eval-record-live eval-retrieval fmt vet
 
 build:
 	go build ./...
@@ -85,6 +88,14 @@ test-retrieval:
 ## COURTLISTENER_TOKEN for authenticated rate limits; re-running resumes.
 fetch-corpus:
 	go run ./cmd/agentd fetch -court $(COURT) -filed-after 2010-01-01 -limit $(LIMIT) -out $(CORPUS)
+
+## dedupe collapses revisions of the same case in $(CORPUS) into $(CORPUS_DEDUP),
+## keyed on docket number, keeping the longest text. CourtListener publishes each
+## revision under its own id, so a raw pull holds the same case several times over;
+## content hashing does not catch it, because revisions genuinely differ. Run this
+## between fetch-corpus and ingest — see ADR-39.
+dedupe:
+	go run ./cmd/agentd dedupe -in $(CORPUS) -out $(CORPUS_DEDUP)
 
 ## ingest chunks, embeds (via Ollama), and upserts the fetched corpus.
 ingest:

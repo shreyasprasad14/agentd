@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>agentd — trajectory viewer</title>
+<!-- An inline SVG favicon rather than a fourth embedded file: it costs one
+     data: URI in the CSP (img-src) and saves a 404 on every page load, which
+     in a debugging tool is noise in exactly the console someone is reading. -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%2338bdf8'/%3E%3Crect x='3' y='7' width='10' height='2' rx='1' fill='%230b1017'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="#/">agentd</a>
+  <span class="brand-sub">trajectory viewer</span>
+  <span id="conn" class="conn" hidden></span>
+</header>
+
+<!-- app.js builds every node below this point with createElement/textContent.
+     The shell is static markup precisely so that nothing dynamic ever has to
+     be parsed as HTML; see the comment at the top of app.js. -->
+<main id="view" class="view" aria-live="polite"></main>
+
+<noscript>
+  <p class="panel error">This viewer renders a run's event log in the browser and needs JavaScript.
+  The same data is available as JSON from <code>GET /v1/runs</code> and <code>GET /v1/runs/:id/events</code>.</p>
+</noscript>
+
+<script src="app.js" defer></script>
+</body>
+</html>

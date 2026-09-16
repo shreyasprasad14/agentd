@@ -14,6 +14,7 @@ runtime did about them.
 | Tool results | **Untrusted data** | Anything a tool returns may have been shaped by untrusted input (a document, a script's output) |
 | Sandboxed code (`run_python`) | **Hostile** | Written by the model, possibly under injection; assume it will try to escape, exfiltrate, and exhaust |
 | Retrieved documents | **Untrusted data** | Public court opinions can contain text that reads as instructions |
+| MCP servers | **Operator-trusted, output untrusted** | Declaring one is a trust decision like installing software; what it *returns* and what it *says about itself* are not trusted (ADR-34, ADR-35) |
 | The person submitting a run | Trusted for v1 | Single API key, no tenancy (spec §2). A run's `agent_config` is a grant, not an attack surface |
 
 The controlling idea: the model decides *what* to do, the runtime decides *what it is allowed
@@ -106,6 +107,40 @@ The JSONL ingest seam (ADR-17) is what makes planting a hostile document a one-l
 suite runs against a database of its own so the planted documents are never reachable from
 `make demo-legal`.
 
+### Tool poisoning: the surface the envelope does not cover
+
+Everything above defends *retrieved content*. An MCP server introduces a differently shaped
+threat, and the honest position is that the envelope does not stop it and was never meant to.
+
+A tool's name, description and JSON Schema are written by the server operator and go into the
+model's **tool definitions** — which is to say outside every `<tool_result>` envelope, in every
+request, before any tool is called. A hostile or compromised server can put an instruction in a
+description and every model call for the rest of the run carries it. No filtering fixes this: the
+description has to reach the model for the tool to be usable at all.
+
+**What bounds it is the trust boundary, not a filter.**
+
+- A server is operator configuration read from a file at boot. Adding one is a trust decision
+  equivalent to installing a binary on the PATH — not equivalent to retrieving a document.
+- A run cannot declare its own server. That would invert the boundary by letting a submission add
+  a capability to the process (ADR-34).
+- The allowlist is still fixed at submission, so a poisoned description can only ask the model to
+  use capabilities the run was already granted. This is the same containment argument as below,
+  made against a peer we do not own.
+
+**What is mechanical is blast radius, not trust.** `MaxDescriptionBytes`, `MaxSchemaBytes`,
+`MaxResultBytes` and `MaxTools` bound how much one server can push into a request; a tool whose
+name cannot survive namespacing is dropped, and one whose schema will not compile gets a
+permissive one rather than stopping the process from starting. These stop a hostile *or merely
+broken* server from filling the context window. They do not make one safe.
+
+**It is measured, not asserted.** `injection-poisoned-tool-description` in
+`evals/cases/injection.yaml` plants an instruction in a tool description and scores it the way
+every other injection case is scored — exposure first, then resistance (ADR-30). Exposure uses a
+separate channel, `exposed_in_tools`, because a description never appears in a tool result: had
+the case reused the result-text check it would have reported "never exposed" for text that sat in
+front of the model for the whole run, which is an injection case that can only pass.
+
 ### Capability escalation
 
 A hijacked model must not reach a capability the run was never granted.
@@ -117,6 +152,9 @@ A hijacked model must not reach a capability the run was never granted.
 - Tool arguments are validated against the tool's JSON Schema before invocation, with
   `additionalProperties: false`, so a tool cannot be handed a flag it does not declare.
 - Unknown `agent_config` fields are rejected at the API with 400.
+- External (MCP) tools go through exactly this path: they are namespaced so a server cannot shadow
+  a builtin, allowlisted by name at submission, and schema-validated like everything else. The
+  loop special-cases nothing for them, which is the point of the `Tool` interface.
 
 ### Hostile code in the sandbox
 

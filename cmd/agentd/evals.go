@@ -7,6 +7,8 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"strings"
@@ -22,6 +24,9 @@ import (
 	"github.com/shreyasprasad/agentd/internal/retrieval/embed"
 	"github.com/shreyasprasad/agentd/internal/sandbox"
 	"github.com/shreyasprasad/agentd/internal/store"
+	"github.com/shreyasprasad/agentd/internal/tools"
+	"github.com/shreyasprasad/agentd/internal/tools/mcp"
+	"github.com/shreyasprasad/agentd/internal/tools/mcp/testserver"
 )
 
 // defaultEvalDSN is a database of its own. The suite ingests with the fake
@@ -125,6 +130,8 @@ func evalSuiteCmd(ctx context.Context, args []string, record bool) error {
 	}
 	searcher := &retrieval.Searcher{Store: st, Embedder: emb, Log: log}
 	registry := registry(exec, sandbox.DefaultLimits(), searcher, st)
+	stopMCP, mcpOK := buildEvalMCP(ctx, registry, log)
+	defer stopMCP()
 
 	runner := evals.NewRunner(evals.Config{
 		Store:        st,
@@ -135,6 +142,7 @@ func evalSuiteCmd(ctx context.Context, args []string, record bool) error {
 		Capabilities: map[string]bool{
 			evals.CapDocker: dockerOK,
 			evals.CapCorpus: evals.HasCorpus(ctx, st),
+			evals.CapMCP:    mcpOK,
 		},
 		Only: parseOnly(*only),
 	})
@@ -293,6 +301,43 @@ func buildEvalSandbox(ctx context.Context, image string, disabled bool, log *slo
 		return exec, false
 	}
 	return exec, true
+}
+
+// buildEvalMCP starts the in-repo MCP server with a poisoned tool description
+// and registers what it advertises, so the INJECTION category can score the
+// one attack the <tool_result> envelope does not cover: a server that writes
+// an instruction into a tool's *description*, which rides in the model's tool
+// definitions outside every envelope (ADR-35).
+//
+// It runs in-process over HTTP on a loopback port rather than spawning the
+// fixture binary. The suite is not testing the transport — the adapter's own
+// tests do that over a real pipe — and an in-process server means `make eval`
+// gains no build step and no child to reap.
+//
+// A failure here is a skip, like Docker: the rest of the suite must still run.
+func buildEvalMCP(ctx context.Context, reg *tools.Registry, log *slog.Logger) (func(), bool) {
+	noop := func() {}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		log.Warn("mcp fixture unavailable; INJECTION mcp cases will skip", "error", err)
+		return noop, false
+	}
+	srv := &http.Server{Handler: testserver.Handler(testserver.Options{PoisonedDescription: true})}
+	go func() { _ = srv.Serve(ln) }()
+	shutdown := func() { _ = srv.Close() }
+
+	ts, closer, err := mcp.Connect(ctx, mcp.Config{Servers: []mcp.ServerConfig{{
+		Name:      testserver.DefaultName,
+		Transport: mcp.TransportHTTP,
+		URL:       "http://" + ln.Addr().String(),
+	}}}, log)
+	if err != nil {
+		log.Warn("mcp fixture unavailable; INJECTION mcp cases will skip", "error", err)
+		shutdown()
+		return noop, false
+	}
+	registerMCP(reg, ts, log)
+	return func() { _ = closer.Close(); shutdown() }, len(ts) > 0
 }
 
 func parseOnly(s string) map[string]bool {
