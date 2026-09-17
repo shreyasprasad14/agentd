@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/require"
 )
@@ -171,4 +172,37 @@ func TestLastSentence(t *testing.T) {
 	got := lastSentence("Alpha beta gamma delta epsilon zeta eta theta.", 20)
 	require.LessOrEqual(t, len(got), 20)
 	require.True(t, strings.HasSuffix(got, "theta."))
+}
+
+// TestOversizeParagraphCutsOnRuneBoundary covers the defect that stopped
+// United States v. Booker from ingesting: a paragraph longer than Max with no
+// sentence terminator inside it falls through to the max-byte cut, and cutting
+// an arbitrary byte offset splits a multi-byte rune. The chunk is then not
+// valid UTF-8, Postgres rejects the insert, and the document is lost with an
+// error that points at the database instead of the chunker.
+func TestOversizeParagraphCutsOnRuneBoundary(t *testing.T) {
+	opt := DefaultOptions()
+	// Byte 1800 (opt.Max) lands on the middle byte of the first em-dash:
+	// 1798 ASCII bytes, then "—" occupying 1798, 1799, 1800.
+	text := strings.Repeat("a", opt.Max-2) + strings.Repeat("— und so weiter ", 20)
+	require.Greater(t, len(text), opt.Max, "the paragraph must be oversize to take the split path")
+	require.NotContains(t, text, ".", "and must hold no sentence end, to reach the max-byte fallback")
+
+	chunks := Split(text)
+
+	require.NotEmpty(t, chunks)
+	for i, c := range chunks {
+		require.True(t, utf8.ValidString(c.Content), "chunk %d is not valid UTF-8", i)
+	}
+	invariants(t, text, chunks, opt)
+}
+
+func TestRuneBoundary(t *testing.T) {
+	s := "ab—cd" // '—' is 3 bytes at offsets 2,3,4
+	require.Equal(t, 2, runeBoundary(s, 2), "already a boundary")
+	require.Equal(t, 2, runeBoundary(s, 3), "mid-rune walks back")
+	require.Equal(t, 2, runeBoundary(s, 4), "mid-rune walks back")
+	require.Equal(t, 5, runeBoundary(s, 5), "boundary after the rune")
+	require.Equal(t, len(s), runeBoundary(s, len(s)+10), "past the end clamps")
+	require.Equal(t, 0, runeBoundary("", 0))
 }

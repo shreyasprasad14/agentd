@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -129,6 +130,7 @@ func seedCorpus(t *testing.T, st *store.Store) {
 		_, err := st.IngestDocument(ctx, d.doc, d.chunks)
 		require.NoError(t, err)
 	}
+	require.NoError(t, st.RefreshLexicalStats(ctx))
 }
 
 func TestSearchVector(t *testing.T) {
@@ -178,6 +180,79 @@ func TestSearchLexical(t *testing.T) {
 	require.Equal(t, "clop-qi", hits[0].SourceID)
 }
 
+// TestSearchLexicalRareTermOutranksRepeatedCommonTerms is the regression the
+// stratified eval caught. Under ts_rank_cd every query lexeme weighed the
+// same, so for "Baxter v. Palmigiano ..." a string citation packed with "v."
+// ranked above the only chunk naming the case. BM25's IDF must put the rare
+// name first.
+func TestSearchLexicalRareTermOutranksRepeatedCommonTerms(t *testing.T) {
+	st := testutil.Postgres(t)
+	ctx := context.Background()
+	docs := map[string]string{
+		"clop-cites": "See Smith v. Jones; Doe v. Roe; Adams v. State; Brown v. State; Green v. United States; " +
+			"White v. State; Black v. Jones; Gray v. Roe; the state court proceedings were civil.",
+		"clop-name": "Baxter v. Palmigiano permits an adverse inference from silence in prison disciplinary proceedings.",
+	}
+	for i, sid := range []string{"clop-cites", "clop-name"} {
+		_, err := st.IngestDocument(ctx, store.Document{SourceID: sid},
+			[]store.Chunk{{Ordinal: 0, Content: docs[sid], Embedding: axis(i), EmbeddingModel: "fake"}})
+		require.NoError(t, err)
+	}
+	// Distractors so "v", "state" and "court" are common and "palmigiano" is rare.
+	for i := 0; i < 8; i++ {
+		_, err := st.IngestDocument(ctx, store.Document{SourceID: fmt.Sprintf("clop-filler-%d", i)},
+			[]store.Chunk{{Ordinal: 0, Content: "Roe v. State held the state court civil proceedings were proper.", Embedding: axis(2), EmbeddingModel: "fake"}})
+		require.NoError(t, err)
+	}
+	require.NoError(t, st.RefreshLexicalStats(ctx))
+
+	hits, err := st.SearchLexical(ctx,
+		"Baxter v. Palmigiano adverse inference from refusal to testify in civil or prison disciplinary proceedings",
+		5, store.CorpusFilter{})
+	require.NoError(t, err)
+	require.NotEmpty(t, hits)
+	require.Equal(t, "clop-name", hits[0].SourceID)
+}
+
+// TestSearchLexicalDropsChunksSharingNoQueryLexeme: to_tsquery re-stems each
+// query lexeme, so "contingent" (lexeme conting) also matches a chunk whose
+// only lexeme is "cont". That chunk shares nothing BM25 can score; its NULL
+// score used to sort above every real match.
+func TestSearchLexicalDropsChunksSharingNoQueryLexeme(t *testing.T) {
+	st := testutil.Postgres(t)
+	ctx := context.Background()
+	for i, c := range []struct{ sid, content string }{
+		{"clop-cont", "Cont. on the next page."},
+		{"clop-fee", "The fee was contingent on success."},
+	} {
+		_, err := st.IngestDocument(ctx, store.Document{SourceID: c.sid},
+			[]store.Chunk{{Ordinal: 0, Content: c.content, Embedding: axis(i), EmbeddingModel: "fake"}})
+		require.NoError(t, err)
+	}
+	require.NoError(t, st.RefreshLexicalStats(ctx))
+
+	hits, err := st.SearchLexical(ctx, "contingent fee", 5, store.CorpusFilter{})
+	require.NoError(t, err)
+	require.Len(t, hits, 1)
+	require.Equal(t, "clop-fee", hits[0].SourceID)
+}
+
+// TestSearchLexicalBeforeStatsRefresh: chunks ingested since the last refresh
+// are still found, because candidates come from the live index and a lexeme
+// missing from the statistics is treated as unseen rather than dropped.
+func TestSearchLexicalBeforeStatsRefresh(t *testing.T) {
+	st := testutil.Postgres(t)
+	ctx := context.Background()
+	_, err := st.IngestDocument(ctx, store.Document{SourceID: "clop-fresh"},
+		[]store.Chunk{{Ordinal: 0, Content: "Qualified immunity shields officials.", Embedding: axis(0), EmbeddingModel: "fake"}})
+	require.NoError(t, err)
+
+	hits, err := st.SearchLexical(ctx, "qualified immunity", 5, store.CorpusFilter{})
+	require.NoError(t, err)
+	require.Len(t, hits, 1)
+	require.Equal(t, "clop-fresh", hits[0].SourceID)
+}
+
 // TestSearchLexicalVerboseQuery is the regression the retrieval eval caught:
 // with AND semantics (websearch_to_tsquery) a whole question matches nothing,
 // because every lexeme has to appear in the same chunk.
@@ -201,7 +276,7 @@ func TestSearchLexicalVerboseQuery(t *testing.T) {
 	require.True(t, found["clop-qi"], "the on-point opinion must be retrieved")
 
 	// A question whose terms sit in one chunk ranks that chunk first; this is
-	// the discrimination ts_rank_cd is doing now that the filter is OR.
+	// the discrimination BM25 does over the OR-ed candidate set.
 	hits, err = st.SearchLexical(ctx,
 		"when is law clearly established by a case directly on point", 5, store.CorpusFilter{})
 	require.NoError(t, err)

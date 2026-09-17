@@ -262,7 +262,17 @@ func splitOversize(text string, p span, opt Options) []span {
 }
 
 // sentenceCut returns the byte offset to cut s at: the last sentence end at
-// or before target, else the first one before max, else max.
+// or before target, else the first one before max, else max backed off to a
+// rune boundary.
+//
+// That last clause is load-bearing. A sentence end is always a rune boundary
+// because it follows an ASCII terminator, but max is an arbitrary byte offset,
+// and a paragraph with no sentence terminator inside 1,800 bytes — a long
+// block quote, a statutory list, a string citation — falls through to it. Cut
+// there and a multi-byte rune is split in half, which produces a chunk that is
+// not valid UTF-8. Postgres rejects the insert ("invalid byte sequence for
+// encoding UTF8"), so the whole document fails to ingest and the failure looks
+// like a database problem rather than a chunking one.
 func sentenceCut(s string, target, max int) int {
 	if max > len(s) {
 		max = len(s)
@@ -279,9 +289,24 @@ func sentenceCut(s string, target, max int) int {
 		}
 	}
 	if best == -1 {
-		return max
+		return runeBoundary(s, max)
 	}
 	return best
+}
+
+// runeBoundary walks i back to the start of the rune it lands inside. Bytes of
+// the form 10xxxxxx are UTF-8 continuation bytes; an offset pointing at one is
+// mid-rune. Walking back rather than forward keeps the cut at or under the
+// caller's cap, and terminates at 0 because a valid string cannot begin with a
+// continuation byte.
+func runeBoundary(s string, i int) int {
+	if i >= len(s) {
+		return len(s)
+	}
+	for i > 0 && s[i]&0xC0 == 0x80 {
+		i--
+	}
+	return i
 }
 
 // abbreviations that end with a period but do not end a sentence.

@@ -1,0 +1,12 @@
+go run ./cmd/agentd eval retrieval -dsn "postgres://agentd:agentd@localhost:5432/agentd?sslmode=disable" -model-url "http://localhost:11434/v1" -embed-model mxbai-embed-large \
+		-labels evals/retrieval/generated/stratified-term_of_art.yaml -results evals/retrieval/results-scotus-cap-stratified/stratified-term_of_art.json
+{"time":"2026-09-16T15:11:10.548994-04:00","level":"INFO","msg":"evaluating","mode":"eval","cases":15,"modes":["vector","bm25","hybrid","hybrid+rerank"],"documents":2484,"chunks":70736}
+
+| mode | recall@8 | recall@20 | recall@50 | MRR |
+|---|---|---|---|---|
+| vector | 0.404 | 0.629 | 0.748 | 0.636 |
+| bm25 | 0.251 | 0.390 | 0.565 | 0.476 |
+| hybrid | 0.370 | 0.630 | 0.723 | 0.643 |
+| hybrid+rerank | 0.552 | 0.701 | 0.723 | 0.724 |
+
+{"time":"2026-09-16T15:25:19.540582-04:00","level":"INFO","msg":"results written","mode":"eval","path":"evals/retrieval/results-scotus-cap-stratified/stratified-term_of_art.json"}

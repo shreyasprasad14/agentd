@@ -595,10 +595,16 @@ unbuilt. `POST /v1/corpus/ingest` was cut rather than built, and the reasoning k
 never calls a model, so the endpoint could only have been a second job queue demonstrating nothing
 the runs API does not already do better over SSE (ADR-37).
 
-**What M6 did not finish.** The four-mode retrieval table is still measured on the 12-opinion
-fixture, where every mode saturates. That is blocked on a `COURTLISTENER_TOKEN` rather than on
-work — the v4 API now returns `401` to anonymous requests — and the README says so where the table
-is, rather than in a footnote.
+**The retrieval table, and what M6 did not finish.** M6 began with the four-mode table still
+measured on the 12-opinion fixture, where every mode saturates. The obvious fix was a
+CourtListener token, since the v4 API now returns `401` to anonymous requests. That got 109
+documents before the free tier's 125-requests-a-day quota stopped it. At that rate the planned
+corpus was a 40-day fetch. The corpus now comes from the Caselaw Access Project instead: 2,484
+opinions in 89 requests and 85 seconds (ADR-40). The deeper corpus and a stratified query set
+then exposed a ranking defect. Lexical search ranked with `ts_rank_cd`, which ignores term rarity,
+and replacing it with BM25 raised case-name recall@8 from 0.217 to 0.831 (ADR-41). What is still
+unfinished: the 63 stratified labels are unreviewed drafts, so the per-category numbers in the
+README are provisional, and the README says so above the table.
 
 ## Deliberate omissions, by milestone
 

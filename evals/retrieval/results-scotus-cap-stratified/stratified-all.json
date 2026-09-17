@@ -1,0 +1,48 @@
+{
+  "cases": 103,
+  "modes": [
+    {
+      "mode": "vector",
+      "recall_at_8": 0.7141354600092463,
+      "recall_at_20": 0.8156264447526581,
+      "recall_at_50": 0.884292649098474,
+      "mrr": 0.8220873786407766,
+      "elapsed_ns": 15763586334
+    },
+    {
+      "mode": "bm25",
+      "recall_at_8": 0.7916897827092,
+      "recall_at_20": 0.8968215441516412,
+      "recall_at_50": 0.9667128987517332,
+      "mrr": 0.8576976421636614,
+      "elapsed_ns": 97881815125
+    },
+    {
+      "mode": "hybrid",
+      "recall_at_8": 0.7451687471104946,
+      "recall_at_20": 0.8820966250577897,
+      "recall_at_50": 0.9685968562182152,
+      "mrr": 0.8560789264672758,
+      "elapsed_ns": 99157379000
+    },
+    {
+      "mode": "hybrid+rerank",
+      "recall_at_8": 0.7641123439667128,
+      "recall_at_20": 0.9090614886731386,
+      "recall_at_50": 0.9685968562182152,
+      "mrr": 0.7853486319505738,
+      "elapsed_ns": 5904116445917
+    }
+  ],
+  "corpus": {
+    "documents": 2484,
+    "chunks": 70736,
+    "embedding_models": [
+      "mxbai-embed-large"
+    ]
+  },
+  "embedding_model": "mxbai-embed-large",
+  "rerank_model": "qwen2.5:7b",
+  "labels": "evals/retrieval/generated/stratified-all.yaml",
+  "generated_at": "2026-09-17T01:18:19.102838Z"
+}

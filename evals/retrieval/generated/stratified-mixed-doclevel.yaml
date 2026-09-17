@@ -1,0 +1,70 @@
+# GENERATED FILE — do not edit by hand.
+#
+# Category mixed at document level: ordinals stripped, one entry per distinct source_id.
+#
+# Source:  evals/retrieval/labels-scotus-cap-stratified.yaml (all labels are unreviewed drafts; see that file's header)
+# Corpus:  data/corpus/scotus-cap-dedup.jsonl, chunk offsets from the agentd database
+# Command: go run ./cmd/evalstrat convert 
+#
+# Paragraph-level labels were mapped to every chunk whose [char_start, char_end)
+# overlaps the paragraph's byte span; each paragraph label is one relevant
+# entry, so recall counts paragraphs, not chunks. Document-level labels keep
+# source_id only. No thresholds: this file reports numbers, it does not gate.
+# Mapping checks: mapping-checks.json in this directory.
+
+cases:
+  - query: can a civil rights plaintiff who recovers only nominal damages be denied attorney's fees under 42 U.S.C. § 1988 even though he is a prevailing party
+    relevant:
+      - source_id: cap-11925002
+      - source_id: cap-9301812
+  - query: after Coy v. Iowa, may a child abuse victim testify by one-way closed circuit television outside the defendant's presence
+    relevant:
+      - source_id: cap-6220020
+      - source_id: cap-6226656
+  - query: are Miranda v. Arizona warnings adequate if police say an appointed lawyer will be provided only once the suspect goes to court
+    relevant:
+      - source_id: cap-6213318
+      - source_id: cap-5861325
+  - query: under Strickland v. Washington what prejudice must a defendant show when his lawyer never conveyed a plea offer that then expired
+    relevant:
+      - source_id: cap-12188490
+      - source_id: cap-12188541
+  - query: is a state marijuana distribution conviction that could cover sharing a small amount for free an aggravated felony under 8 U.S.C. § 1101(a)(43)(B)
+    relevant:
+      - source_id: cap-12697041
+  - query: does 42 U.S.C. § 2000e-2(m) require direct evidence of discrimination before a jury can get a mixed-motive instruction
+    relevant:
+      - source_id: cap-8897257
+      - source_id: cap-3658005
+  - query: can a lodestar fee award under 42 U.S.C. § 1988 be enhanced because counsel's performance and results were superior
+    relevant:
+      - source_id: cap-3581942
+  - query: may EPA weigh costs against benefits when setting best technology available standards for cooling water intake structures under 33 U.S.C. § 1326(b)
+    relevant:
+      - source_id: cap-3653760
+  - query: can parents get tuition reimbursement under IDEA for a private school that does not meet the state standards in 20 U.S.C. § 1401(a)(18)
+    relevant:
+      - source_id: cap-230315
+      - source_id: cap-3658126
+  - query: given Ohralik v. Ohio State Bar Assn., may a state flatly ban lawyers' truthful targeted mail to people known to have a specific legal problem
+    relevant:
+      - source_id: cap-6219390
+      - source_id: cap-1564170
+      - source_id: cap-3573355
+  - query: does 42 U.S.C. § 1395x(v)(1)(A)(ii) let HHS reissue Medicare cost-limit rules with retroactive effect
+    relevant:
+      - source_id: cap-1494999
+  - query: after Hodel v. Irving, does the 1984 amended escheat provision of the Indian Land Consolidation Act still take property without just compensation
+    relevant:
+      - source_id: cap-11595355
+  - query: how should a federal court in a diversity case apply New York CPLR § 5501(c)'s excessive verdict standard without violating the Seventh Amendment
+    relevant:
+      - source_id: cap-1729749
+  - query: under United States v. Place, does walking a drug-detection dog around a car during a lawful traffic stop require reasonable suspicion
+    relevant:
+      - source_id: cap-5902584
+      - source_id: cap-5902037
+      - source_id: cap-12696458
+  - query: under Malley v. Briggs, are officers who executed an overbroad warrant approved by a magistrate entitled to qualified immunity
+    relevant:
+      - source_id: cap-12186811

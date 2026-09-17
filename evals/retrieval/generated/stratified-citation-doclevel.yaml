@@ -1,0 +1,76 @@
+# GENERATED FILE — do not edit by hand.
+#
+# Category citation at document level: ordinals stripped, one entry per distinct source_id.
+#
+# Source:  evals/retrieval/labels-scotus-cap-stratified.yaml (all labels are unreviewed drafts; see that file's header)
+# Corpus:  data/corpus/scotus-cap-dedup.jsonl, chunk offsets from the agentd database
+# Command: go run ./cmd/evalstrat convert 
+#
+# Paragraph-level labels were mapped to every chunk whose [char_start, char_end)
+# overlaps the paragraph's byte span; each paragraph label is one relevant
+# entry, so recall counts paragraphs, not chunks. Document-level labels keep
+# source_id only. No thresholds: this file reports numbers, it does not gate.
+# Mapping checks: mapping-checks.json in this directory.
+
+cases:
+  - query: 15 U.S.C. § 1681m(a) when is an insurance rate increase based on a credit report
+    relevant:
+      - source_id: cap-3573430
+  - query: 28 U.S.C. § 994(h) maximum term authorized includes statutory recidivist enhancements
+    relevant:
+      - source_id: cap-11652916
+      - source_id: cap-3674133
+  - query: 42 U.S.C. § 1396p(a) anti-lien provision and a state's claim on a Medicaid beneficiary's tort settlement
+    relevant:
+      - source_id: cap-12407746
+      - source_id: cap-3276324
+  - query: 26 U.S.C. § 6321 federal tax lien on an inheritance the taxpayer disclaimed under state law
+    relevant:
+      - source_id: cap-9476074
+  - query: 11 U.S.C. § 523(a)(2)(A) what level of reliance must a creditor show
+    relevant:
+      - source_id: cap-323761
+      - source_id: cap-3674023
+  - query: 8 U.S.C. § 1231(a)(6) detention of inadmissible aliens beyond the 90-day removal period
+    relevant:
+      - source_id: cap-3442797
+      - source_id: cap-9313599
+      - source_id: cap-9031152
+  - query: 28 U.S.C. § 636(b)(1)(B) prisoner petitions challenging conditions of confinement isolated incident
+    relevant:
+      - source_id: cap-6218684
+      - source_id: cap-9108401
+  - query: 11 U.S.C. § 522(l) trustee objection to claimed exemption after 30 days
+    relevant:
+      - source_id: cap-6237415
+      - source_id: cap-3641718
+  - query: 29 U.S.C. § 1103(c)(1) anti-inurement provision employer use of pension plan surplus
+    relevant:
+      - source_id: cap-11076610
+      - source_id: cap-5882913
+  - query: 21 U.S.C. § 802(44) felony drug offense state misdemeanor punishable by more than one year
+    relevant:
+      - source_id: cap-3674213
+  - query: 28 U.S.C. § 1915(d) is an in forma pauperis complaint that fails Rule 12(b)(6) automatically frivolous
+    relevant:
+      - source_id: cap-605680
+      - source_id: cap-11727595
+  - query: 42 U.S.C. § 406(b) contingent-fee agreement versus lodestar for Social Security attorney fees
+    relevant:
+      - source_id: cap-353782
+  - query: 28 U.S.C. § 1367(d) tolling for state-law claims against a nonconsenting State dismissed on Eleventh Amendment grounds
+    relevant:
+      - source_id: cap-9108418
+      - source_id: cap-9030949
+  - query: 28 U.S.C. § 1500 Court of Federal Claims jurisdiction when a suit on the same operative facts is pending in district court
+    relevant:
+      - source_id: cap-4225347
+      - source_id: cap-12197
+  - query: 328 U.S. 680 walking time on the employer's premises before the workday
+    relevant:
+      - source_id: cap-5923137
+      - source_id: cap-12701987
+  - query: 18 U.S.C. § 3582(c)(2) does Booker make the sentence reduction policy statement advisory
+    relevant:
+      - source_id: cap-3641961
+      - source_id: cap-6023823

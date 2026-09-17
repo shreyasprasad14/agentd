@@ -1,0 +1,9 @@
+go run ./cmd/agentd eval retrieval -dsn "postgres://agentd:agentd@localhost:5432/agentd?sslmode=disable" -model-url "http://localhost:11434/v1" -embed-model mxbai-embed-large \
+		-labels evals/retrieval/generated/stratified-mixed.yaml -results evals/retrieval/results-scotus-cap-stratified/stratified-mixed.json
+{"time":"2026-09-16T15:25:20.392413-04:00","level":"INFO","msg":"evaluating","mode":"eval","cases":15,"modes":["vector","bm25","hybrid","hybrid+rerank"],"documents":2484,"chunks":70736}
+{"time":"2026-09-16T15:38:12.08444-04:00","level":"WARN","msg":"rerank batch degraded to fused order","mode":"eval","error":"local model: Post \"http://localhost:11434/v1/chat/completions\": terminated signal received","batch_start":40}
+{"time":"2026-09-16T15:38:12.084464-04:00","level":"WARN","msg":"rerank batch degraded to fused order","mode":"eval","error":"local model: Post \"http://localhost:11434/v1/chat/completions\": terminated signal received","batch_start":10}
+{"time":"2026-09-16T15:38:12.08444-04:00","level":"WARN","msg":"rerank batch degraded to fused order","mode":"eval","error":"local model: Post \"http://localhost:11434/v1/chat/completions\": terminated signal received","batch_start":30}
+{"time":"2026-09-16T15:38:12.085137-04:00","level":"WARN","msg":"rerank failed, returning fused order","mode":"eval","error":"context canceled"}
+make: *** [eval-retrieval] Terminated: 15
+agentd: query "after Hodel v. Irving, does the 1984 amended escheat provision of the Indian Land Consolidation Act still take property without just compensation": rerank degraded to hybrid; fix the reranker or evaluate without it

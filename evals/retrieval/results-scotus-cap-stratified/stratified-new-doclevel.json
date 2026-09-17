@@ -1,0 +1,48 @@
+{
+  "cases": 63,
+  "modes": [
+    {
+      "mode": "vector",
+      "recall_at_8": 0.7568783068783068,
+      "recall_at_20": 0.8354497354497356,
+      "recall_at_50": 0.8936507936507937,
+      "mrr": 0.9686318972033258,
+      "elapsed_ns": 10218216208
+    },
+    {
+      "mode": "bm25",
+      "recall_at_8": 0.8407407407407409,
+      "recall_at_20": 0.9425925925925925,
+      "recall_at_50": 0.9801587301587301,
+      "mrr": 0.9863945578231292,
+      "elapsed_ns": 65117356500
+    },
+    {
+      "mode": "hybrid",
+      "recall_at_8": 0.8216931216931219,
+      "recall_at_20": 0.9108465608465608,
+      "recall_at_50": 0.9748677248677249,
+      "mrr": 0.9773242630385487,
+      "elapsed_ns": 64951099583
+    },
+    {
+      "mode": "hybrid+rerank",
+      "recall_at_8": 0.8613756613756614,
+      "recall_at_20": 0.9320105820105821,
+      "recall_at_50": 0.9748677248677249,
+      "mrr": 0.9431216931216931,
+      "elapsed_ns": 3421640587709
+    }
+  ],
+  "corpus": {
+    "documents": 2484,
+    "chunks": 70736,
+    "embedding_models": [
+      "mxbai-embed-large"
+    ]
+  },
+  "embedding_model": "mxbai-embed-large",
+  "rerank_model": "qwen2.5:7b",
+  "labels": "evals/retrieval/generated/stratified-new-doclevel.yaml",
+  "generated_at": "2026-09-17T02:17:42.237495Z"
+}

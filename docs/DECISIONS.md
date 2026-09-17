@@ -406,6 +406,39 @@ is exactly where reranking could start to pay, and this one is quota-capped at 3
 but it does mean **no claim that reranking improves retrieval is currently supported by
 measurement, and the README says so.**
 
+**Amended again, same day: that prediction was tested and the sign flipped.** The amendment above
+guessed that a deeper corpus is "exactly where reranking could start to pay". On the 2,484-document
+CAP corpus (`evals/retrieval/results-scotus-cap.json`) it does pay, a little: `hybrid+rerank`
+repairs hybrid's two recall@8 misses (0.950 → 1.000) and raises MRR 0.866 → 0.877. The claim that
+"no claim that reranking improves retrieval is supported by measurement" is now false, and the
+prior result should be read as not having survived a harder corpus rather than as having been
+wrong at the time.
+
+**The policy is unchanged, and for the first time it does not depend on the sign of the effect.**
++0.011 MRR costs 97× hybrid's wall time (2,001 s against 21). More decisively, the whole reranked
+pipeline is *worse than the vector search underneath it* — 0.877 MRR against 0.942, at 333× the
+wall time — so the rerank pass is not merely a bad trade against hybrid, it is a bad trade against
+doing nothing. Reranking stays local-only, stays off by default in anything latency-sensitive, and
+the honest summary is: **measured twice, on two corpora, the rerank pass has never once produced a
+ranking better than plain vector search.**
+
+**Amended a third time: that summary did not survive a query set built to separate the modes.**
+It was true of the 40 paraphrase queries, and it is still true of them after ADR-41 (0.870 MRR
+against vector's 0.942). It is false of the stratified set. On all four of its categories
+`hybrid+rerank` beats vector on recall@8 — citation 0.713 vs 0.623, case_name 0.584 vs 0.516,
+term_of_art 0.531 vs 0.404, mixed 0.627 vs 0.584 — and on MRR in two, citation (0.802 vs 0.682)
+and mixed (0.872 vs 0.752). It loses on MRR in case_name and term_of_art. The paraphrase set could
+not show this because every mode saturates on it, and a summary drawn from a saturated benchmark
+was a claim about the benchmark. The 97× above is right for the `ts_rank_cd` run it describes.
+With BM25, the pass costs 45–70× hybrid's wall time and 285–430× vector's, depending on category
+(`evals/retrieval/results-scotus-cap-stratified/`).
+
+**The policy still stands, now for the reason the second amendment gave and not the one it ended
+on.** The trade is a small, inconsistent gain for two orders of magnitude of latency, which is a
+price argument, not a claim that reranking never helps. Its case_name and term_of_art MRR losses
+may be reordering within the right opinion, which cannot be scored until the stratified set's
+draft labels are reviewed.
+
 **Consequence worth knowing.** `spent_usd` is now the fold of `model_responded` *and*
 `tool_succeeded` costs. Anyone checking the counters by summing only `model_responded` will get
 a mismatch — the invariant "the counters equal the fold of the log" still holds, but the fold
@@ -876,3 +909,162 @@ question does not arise.
 query. That labeling is only correct *because* the corpus is deduplicated: against the raw pull,
 labeling one id scores its own revisions as misses and labeling all of them inflates recall, and
 there is no third option. Deduplicating the corpus is what removes the choice between two biases.
+
+## ADR-40: The benchmark corpus comes from the Caselaw Access Project, not CourtListener
+
+**Decision.** `agentd fetch-cap` pulls opinions from the Caselaw Access Project's static file
+service (`static.case.law`) and writes the same JSONL `agentd fetch` writes. It is the default
+corpus source: `make fetch-cap` produces `data/corpus/<court>-cap.jsonl`, and the retrieval
+numbers are measured on it. The CourtListener fetcher stays, and stays useful, for a different
+job.
+
+**Why.** ADR-17 chose the CourtListener REST API over the bulk export and priced it at "two
+requests per opinion and a free token", which was right about the mechanism and wrong about the
+budget. CourtListener's free authenticated tier allows **125 requests per day** — 5 per minute,
+50 per hour, rolling. At two requests per opinion that is about 60 documents a day, and the M6
+pull stopped at 109 documents for exactly that reason. The corpus the plan sized at 2,500
+documents was not slow to fetch, it was a **40-day** fetch, and no amount of resuming fixes an
+arithmetic problem.
+
+CAP is the same data shape from a CDN: no token, no quota, and one request per *volume* instead
+of two per opinion. The 2,500-document pull is 89 requests and took 85 seconds. That is not an
+optimisation of the old path, it is a different order of magnitude, and it is the difference
+between a corpus that can be rebuilt on demand and one that took three weeks of patience.
+
+**What it costs, which is recency.** CAP's United States Reports end in 2014. Anything decided
+since is not in it, and for an agent answering questions about current law that would be
+disqualifying. For a retrieval benchmark it is not: the question the benchmark asks is whether
+the ranker puts the correct paragraph first when the corpus is deep enough that top-8 is a
+selective slice, and 1988–2014 is as good a period for that as any other. The two fetchers are
+kept because the two jobs are different — CAP builds the corpus, CourtListener tops it up with
+recent cases at 60 a day, which is a sane rate for an increment and a hopeless one for a bulk
+load.
+
+**Why not the CourtListener bulk export, which ADR-17 already considered.** Its reasoning holds
+and now has a number attached: `opinions-2026-06-30.csv.bz2` is 54 GB compressed, plus a 2.4 GB
+clusters file and a dockets file to join against, to extract one court. CAP is 2.2 MB per volume
+and is already organised by jurisdiction.
+
+**Why the labels were rewritten rather than reused.** CAP stops at 2014 and the CourtListener
+pull was 2024–2026, so the sets cannot collide: the old 40 labels would have stayed valid, with
+CAP supplying 2,484 documents of distractor depth for free and no labeling work at all. That was
+the cheap option and it was declined. It would have left the 40 relevant documents as the only
+post-2014 documents in the corpus, and a 2024 opinion does not talk like a 1995 one — the ranker
+could have separated the needles from the haystack on vintage alone and scored well for a reason
+that has nothing to do with retrieval. A benchmark that can be passed by accident measures
+nothing. One source, one period, 40 fresh labels written by the method
+`evals/retrieval/labels-scotus-cap.yaml` documents.
+
+**A filter, and what it does not catch.** Every CAP case record carries exactly one `majority`
+opinion, including cert denials and one-line orders — 571 of the 594 records in 570 U.S. are
+under 500 characters. A 4,000-character floor separates merits opinions from orders almost
+perfectly, and "almost" is the honest word: a cert denial carrying a long dissent from denial
+clears the floor. Two of the 40 sampled label candidates were of that kind and were replaced by
+the next document in corpus order, which the label file records rather than silently doing.
+
+**A bug this surfaced.** `make ingest` read `$(CORPUS)`, the raw pull, not `$(CORPUS_DEDUP)`.
+Because ingest upserts by `source_id`, running it after `make dedupe` re-added the revisions
+dedupe had removed instead of replacing them — the database held 109 documents while
+`results-scotus.json` recorded the 84 its numbers were measured on. The target now reads the
+deduplicated file and declares it as a prerequisite. ADR-39 separated the two files for a
+reason; the Makefile was quietly undoing it.
+
+**What the corpus measured, and what it cost to find out.** The point of the swap was to make
+`recall@8` discriminate by making top-8 a 0.3% slice instead of a 9.5% one. It did not work, and
+that is the most useful thing the run produced. Vector `recall@8` is 1.000 on 2,484 documents
+exactly as it was on 84, so the README's standing explanation — the corpus is 30× too small — was
+wrong, and a prediction that had been sitting in the document as a caveat is now a refuted
+hypothesis. The remaining suspect is the labeling method: a query written from an opinion's own
+statement of the question presented carries that opinion's distinctive language, which is the
+right rule for avoiding *ranking* bias and appears to make the retrieval itself easy no matter how
+deep the corpus. Fixing that means writing queries that are answerable without echoing their
+target, which is a harder labeling job than either label set has attempted.
+
+Two results did change, and both are in the README table: fusion now *loses* to its own vector
+input (0.866 MRR against 0.942), because BM25 degrades with corpus depth and RRF weights its
+inputs by rank alone; and the rerank pass, a measured loss on the small corpus, is a small
+measured gain on this one, which amends ADR-23 for the second time.
+
+**One bug, found by the data rather than by a test.** `United States v. Booker` failed to ingest
+with `invalid byte sequence for encoding "UTF8"`, which reads like a database problem and was a
+chunker problem. `sentenceCut` falls back to cutting at the `Max` byte offset when a paragraph
+holds no sentence terminator inside it; sentence ends are always rune boundaries because they
+follow an ASCII terminator, but `Max` is an arbitrary byte, and Booker has a citation block long
+enough to reach it. The cut landed inside an em-dash and produced a chunk that was not valid
+UTF-8. The 84-document corpus never had a paragraph shaped that way. Fixed by backing the fallback
+cut off to a rune boundary, with a regression test that fails against the old code.
+
+## ADR-41: Lexical search ranks with BM25, not `ts_rank_cd`
+
+**Decision.** `SearchLexical` keeps its candidate set, chunks matching any query lexeme through
+the GIN index, and replaces the ranking: Okapi BM25 with k1 = 1.2 and b = 0.75. The corpus
+statistics BM25 needs live in three materialized views added by migration 0004:
+`lexeme_stats` (chunks per lexeme, for IDF), `chunk_lexical_length`, and
+`corpus_lexical_stats` (chunk count and average length). `retrieval.Ingest` refreshes them once
+at the end of every run.
+
+**Why.** The mode the README table calls `bm25` was never BM25. `ts_rank_cd` scores how often
+and how close together the query's lexemes occur, and weighs every lexeme the same. It has no
+notion of rarity. On an agent-length question that is fatal. For "Baxter v. Palmigiano adverse
+inference ...", the top nine hits were string citations repeating `v.`, which appears in 49% of
+chunks. None of them contained `palmigiano`, which appears in 10 chunks. The one chunk naming
+the case ranked tenth. The stratified eval set (`labels-scotus-cap-stratified.yaml`) made this
+visible: lexical search came last in every category, including `case_name` and `citation`,
+where keyword matching should be strongest.
+
+It also corrects ADR-40's reading of the CAP corpus. "BM25 degrades at depth, deepening the
+corpus gives every common word in an agent-length question thousands more places to match"
+describes a ranker without IDF. IDF exists precisely to discount those words. The fusion loss
+ADR-40 measured was RRF averaging in a broken ranker, not a limit of lexical retrieval.
+
+**Measured before shipping.** Lexical mode only, `eval.Run` unchanged, recall@8 / MRR:
+
+| category | n | `ts_rank_cd` | BM25 |
+|---|---|---|---|
+| paraphrase | 40 | 0.850 / 0.608 | 1.000 / 0.927 |
+| citation | 16 | 0.412 / 0.416 | 0.713 / 0.760 |
+| case_name | 17 | 0.217 / 0.198 | 0.831 / 0.910 |
+| term_of_art | 15 | 0.251 / 0.476 | 0.460 / 0.730 |
+| mixed | 15 | 0.284 / 0.251 | 0.607 / 0.844 |
+
+The new labels were found by exact-term scanning of the corpus, which could flatter any lexical
+ranker. The paraphrase labels were not, and improved as much. A prototype outside the retrieval
+code produced these numbers first. The shipped query was checked against it and matches to three
+decimals in every category. Raw results are in
+`evals/retrieval/results-scotus-cap-stratified/baseline-ts_rank_cd/lexical-prototype/`.
+
+**Why materialized views, not tables maintained per document.** Updating a df table inside
+`IngestDocument` would touch the rows for `v`, `court` and `state` in every document's
+transaction, and concurrent ingests would queue on them. A refresh once per run costs a few
+seconds on 70,736 chunks. The price is staleness between an ingest and its refresh. That is
+bounded and harmless: candidates come from the live index, so new chunks are found immediately.
+A lexeme or chunk the statistics have not seen ranks as unseen or average length. Before the
+first refresh, ranking falls back to term frequency, not to no results.
+
+**Why not `pg_search` or another native BM25 index.** It is faster, but it changes the Postgres
+image and brings its own tokenizer. Results would stop being comparable with every number
+measured so far, and the tokenizer problems in `evals/retrieval/TOKENIZER_NOTES.md` would be
+swapped for unknown ones rather than fixed. What the SQL version costs is latency. Averaged per
+category, it takes 0.83–1.14 s per query against 0.54–0.92 s for `ts_rank_cd`, about 1.5×
+slower. The time goes to queries whose lexemes match tens of thousands of chunks, each of which
+has its tsvector scanned. In `hybrid+rerank` the reranker takes tens of seconds, so this is
+noise there. In `bm25` and `hybrid` mode it is the difference, and a native index is the fix if
+it matters.
+
+**Two bugs the parity check caught.**
+- `to_tsquery` re-stems each quoted lexeme (`conting` becomes `cont`), so a chunk can match the
+  candidate filter while sharing no lexeme with the query. With an outer join its BM25 score was
+  NULL, and NULL sorts first under `DESC`, so junk ranked on top.
+- Computing chunk length with a window function at query time was 2.4× slower than reading it
+  from a view.
+
+Both have regression tests. The first test fails against the outer-join version.
+
+**Not tuned.** k1 and b are textbook defaults. The only labels to tune against are unreviewed
+drafts with n ≈ 15 per category, and fitting parameters to them would measure the fit, not the
+ranker.
+
+**Not changed.** The tokenizer (`to_tsvector('english', …)`), and with it everything
+`TOKENIZER_NOTES.md` lists: spaced `U. S. C.`, dropped `§` and subsection letters, OCR `(l)`,
+`Colding` → `cold`. BM25 recovers most citation and case-name recall without those fixes. Whether
+the fixes would add more is a separate measurement.

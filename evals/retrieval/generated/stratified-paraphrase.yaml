@@ -1,0 +1,135 @@
+# GENERATED FILE — do not edit by hand.
+#
+# Category paraphrase, paragraph labels mapped to chunk ordinals.
+#
+# Source:  evals/retrieval/labels-scotus-cap-stratified.yaml (all labels are unreviewed drafts; see that file's header)
+# Corpus:  data/corpus/scotus-cap-dedup.jsonl, chunk offsets from the agentd database
+# Command: go run ./cmd/evalstrat convert 
+#
+# Paragraph-level labels were mapped to every chunk whose [char_start, char_end)
+# overlaps the paragraph's byte span; each paragraph label is one relevant
+# entry, so recall counts paragraphs, not chunks. Document-level labels keep
+# source_id only. No thresholds: this file reports numbers, it does not gate.
+# Mapping checks: mapping-checks.json in this directory.
+
+cases:
+  - query: is the one-year deadline for returning an abducted child under the Hague Convention paused while the abducting parent hides the child
+    relevant:
+      - source_id: cap-12704826
+  - query: what causation standard applies to a Title VII retaliation claim against an employer
+    relevant:
+      - source_id: cap-12698471
+  - query: may a court award costs to a debt collector that wins an FDCPA suit without finding the case was brought in bad faith
+    relevant:
+      - source_id: cap-12407533
+  - query: is the immigration board's method for deciding which deportable residents may seek discretionary relief arbitrary and capricious
+    relevant:
+      - source_id: cap-12185803
+  - query: can a state agency sue officials of its own state in federal court under Ex parte Young
+    relevant:
+      - source_id: cap-5908829
+  - query: how is prejudice assessed when a capital defendant's lawyer failed to investigate mitigating evidence before sentencing
+    relevant:
+      - source_id: cap-3644230
+  - query: may a habeas court overturn a conviction based on an expert report criticizing the DNA evidence written years after trial
+    relevant:
+      - source_id: cap-3639161
+  - query: must a RICO association-in-fact enterprise have a structure beyond the pattern of racketeering it engages in
+    relevant:
+      - source_id: cap-3653895
+  - query: can a party recover paralegal fees at market rates rather than at what they cost the attorney
+    relevant:
+      - source_id: cap-3673829
+  - query: may a payphone operator sue a long-distance carrier in federal court for refusing to pay compensation the FCC requires
+    relevant:
+      - source_id: cap-3556217
+  - query: is it automatically illegal price fixing for a lawful joint venture to set a single price for the products it sells
+    relevant:
+      - source_id: cap-3276255
+  - query: can a corporation's sole shareholder sue for racial discrimination in contracts the corporation made
+    relevant:
+      - source_id: cap-5992113
+  - query: what is the maximum statutory damages award for a Truth in Lending Act violation on a car loan
+    relevant:
+      - source_id: cap-5956351
+  - query: which statute of limitations governs a discrimination claim created by the Civil Rights Act of 1991
+    relevant:
+      - source_id: cap-5870337
+  - query: how is retrogression measured when a state submits a redistricting plan for preclearance under the Voting Rights Act
+    relevant:
+      - source_id: cap-8898256
+  - query: may an unnamed class member who objected at the fairness hearing appeal approval of a settlement without intervening
+    relevant:
+      - source_id: cap-1254780
+  - query: does the Indian Gaming Regulatory Act exempt tribes from federal wagering excise taxes
+    relevant:
+      - source_id: cap-9108010
+  - query: does due process bar applying a court decision abolishing the year and a day rule to conduct that came before it
+    relevant:
+      - source_id: cap-9301453
+  - query: does a blanket primary letting voters of any party choose a party's nominee violate the First Amendment
+    relevant:
+      - source_id: cap-9413964
+  - query: is a jury instruction that omits an element of the offense subject to harmless error review
+    relevant:
+      - source_id: cap-1248184
+  - query: does a union violate its duty of fair representation by tracking the statutory language of a union security clause
+    relevant:
+      - source_id: cap-11076311
+  - query: may an appeals court order a reduced damages award without offering the plaintiff a new trial
+    relevant:
+      - source_id: cap-11503428
+  - query: do the 1996 habeas corpus amendments apply to noncapital petitions already pending when the law passed
+    relevant:
+      - source_id: cap-915758
+  - query: are punitive damages from a personal injury lawsuit excluded from taxable gross income
+    relevant:
+      - source_id: cap-11594850
+  - query: may a national bank charge cardholders late fees allowed in its home state but banned where the cardholder lives
+    relevant:
+      - source_id: cap-11746523
+  - query: may a public school district require random urine drug testing of students who play sports
+    relevant:
+      - source_id: cap-1564392
+  - query: what should a habeas judge do when in grave doubt whether a constitutional trial error was harmless
+    relevant:
+      - source_id: cap-1330548
+  - query: does a statewide use tax that exceeds local sales tax rates discriminate against interstate commerce
+    relevant:
+      - source_id: cap-1147098
+  - query: can a coconspirator challenge a search because he supervised the conspiracy or controlled the property searched
+    relevant:
+      - source_id: cap-11784
+  - query: may the federal government recover state taxes it says were wrongfully assessed against its private contractor
+    relevant:
+      - source_id: cap-6237931
+  - query: may a state impose a disposal fee only on hazardous waste generated outside the state
+    relevant:
+      - source_id: cap-11729096
+  - query: may release bonds for aliens awaiting a deportation decision forbid them from working
+    relevant:
+      - source_id: cap-6221371
+  - query: does letting the Attorney General temporarily schedule a new drug unconstitutionally delegate legislative power
+    relevant:
+      - source_id: cap-6219461
+  - query: is a notice of appeal filed after a bench ruling but before entry of judgment effective
+    relevant:
+      - source_id: cap-6223247
+  - query: was the agency's decision to restore terminated pension plans arbitrary and capricious
+    relevant:
+      - source_id: cap-12125138
+  - query: must a federal agency bargain over subjecting compliance with a budget office circular to grievance procedures
+    relevant:
+      - source_id: cap-4885
+  - query: does the Federal Advisory Committee Act apply to the bar association committee that advises on judicial nominees
+    relevant:
+      - source_id: cap-6215707
+  - query: may a state forbid the governing bodies of political parties from endorsing candidates in primaries
+    relevant:
+      - source_id: cap-12031909
+  - query: does a state notice-of-claim requirement apply to a federal civil rights suit filed in state court
+    relevant:
+      - source_id: cap-1775015
+  - query: does serving a foreign parent company through its domestic subsidiary satisfy the Hague Service Convention
+    relevant:
+      - source_id: cap-6222967

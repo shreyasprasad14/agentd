@@ -1,0 +1,48 @@
+{
+  "cases": 15,
+  "modes": [
+    {
+      "mode": "vector",
+      "recall_at_8": 0.9111111111111111,
+      "recall_at_20": 0.9666666666666667,
+      "recall_at_50": 1,
+      "mrr": 0.9666666666666667,
+      "elapsed_ns": 2835198042
+    },
+    {
+      "mode": "bm25",
+      "recall_at_8": 0.8555555555555555,
+      "recall_at_20": 0.9666666666666667,
+      "recall_at_50": 1,
+      "mrr": 1,
+      "elapsed_ns": 17565668917
+    },
+    {
+      "mode": "hybrid",
+      "recall_at_8": 0.9111111111111111,
+      "recall_at_20": 0.9666666666666667,
+      "recall_at_50": 1,
+      "mrr": 0.9666666666666667,
+      "elapsed_ns": 17696930542
+    },
+    {
+      "mode": "hybrid+rerank",
+      "recall_at_8": 0.9222222222222222,
+      "recall_at_20": 0.9666666666666667,
+      "recall_at_50": 1,
+      "mrr": 0.9555555555555556,
+      "elapsed_ns": 798405018417
+    }
+  ],
+  "corpus": {
+    "documents": 2484,
+    "chunks": 70736,
+    "embedding_models": [
+      "mxbai-embed-large"
+    ]
+  },
+  "embedding_model": "mxbai-embed-large",
+  "rerank_model": "qwen2.5:7b",
+  "labels": "evals/retrieval/generated/stratified-mixed-doclevel.yaml",
+  "generated_at": "2026-09-17T03:17:06.77289Z"
+}

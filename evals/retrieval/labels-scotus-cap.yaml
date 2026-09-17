@@ -1,0 +1,175 @@
+# Hand-labeled retrieval queries for the Caselaw Access Project SCOTUS corpus.
+#
+# 2,484 SCOTUS merits opinions, 1988–2014, one document per case. This replaces
+# labels-scotus.yaml, which targeted an 84-document CourtListener pull. The
+# corpus changed source because of a quota, not a preference: CourtListener's
+# free tier allows 125 API requests a day against roughly two per opinion, so
+# the 2,500-document corpus the retrieval plan calls for was a 40-day pull. CAP
+# is static files behind a CDN — one request per volume, no token, no quota —
+# and the same 2,500 documents took 85 seconds. See ADR-40.
+#
+# WHY THE LABELS WERE REWRITTEN RATHER THAN REUSED. CAP's United States Reports
+# stop at 2014 and the CourtListener pull was 2024–2026, so the two sets cannot
+# collide and the old labels could have been kept, with CAP supplying distractor
+# depth for free. That was rejected. It would have left the 40 relevant
+# documents as the only post-2014 documents in the corpus, and the vocabulary of
+# a 2024 opinion is not the vocabulary of a 1995 one — the ranker could separate
+# the needles from the haystack on vintage alone, which is a way of scoring
+# well that has nothing to do with retrieval. One source, one period, fresh
+# labels.
+#
+# METHOD, unchanged from labels-scotus.yaml and restated because it is the part
+# that makes the numbers worth anything. Cases were picked off the corpus
+# listing by position — every 62nd document of 2,484, which spreads the set
+# across 24 terms — and each query was written from that opinion's own statement
+# of the question presented, never from search results. A query written by
+# reading what already ranks first measures the ranker against itself.
+#
+# Two of the 40 sampled documents were cert denials carrying a long separate
+# statement, which clears the fetcher's 4,000-character floor without being a
+# merits opinion; each was replaced by the next document in corpus order
+# (Devlin v. Scardelletti and Neder v. United States). The substitution is
+# recorded here rather than silently made, because "we resampled until the
+# labels looked good" and "we resampled twice, for a stated reason" are
+# different claims.
+#
+# CAVEAT, stated because the table is worth less without it: these queries were
+# written by a language model, not by a lawyer. They are faithful to the
+# question each opinion says it is deciding, and phrased as an agent would ask
+# rather than as keywords. But a model wrote them, and the system being scored
+# is the same kind of system. Treat this as a well-constructed benchmark, not
+# as a human-labeled gold set.
+#
+# One document is relevant per query. That labeling is correct here for the
+# same reason it was correct for the deduplicated CourtListener corpus (ADR-39):
+# `agentd dedupe` collapsed the 16 cases CAP reports twice, so no query has a
+# second chance to land a copy of its own answer in top-8.
+#
+# Thresholds are the same 0.70 recall@8 the earlier sets used, carried over
+# unchanged rather than refitted to what this corpus produced.
+
+thresholds:
+  hybrid: {recall_at_8: 0.70}
+  hybrid_rerank: {recall_at_8: 0.70}
+
+cases:
+  - query: "is the one-year deadline for returning an abducted child under the Hague Convention paused while the abducting parent hides the child"
+    relevant:
+      - {source_id: "cap-12704826"}   # Lozano v. Montoya Alvarez (No. 12-820)
+  - query: "what causation standard applies to a Title VII retaliation claim against an employer"
+    relevant:
+      - {source_id: "cap-12698471"}   # Univ. of Tex. Sw. Med. Ctr. v. Nassar (No. 12-484)
+  - query: "may a court award costs to a debt collector that wins an FDCPA suit without finding the case was brought in bad faith"
+    relevant:
+      - {source_id: "cap-12407533"}   # Marx v. General Revenue Corp. (No. 11-1175)
+  - query: "is the immigration board's method for deciding which deportable residents may seek discretionary relief arbitrary and capricious"
+    relevant:
+      - {source_id: "cap-12185803"}   # Judulang v. Holder (No. 10-694)
+  - query: "can a state agency sue officials of its own state in federal court under Ex parte Young"
+    relevant:
+      - {source_id: "cap-5908829"}    # Virginia Office for Protection & Advocacy v. Stewart (No. 09-529)
+  - query: "how is prejudice assessed when a capital defendant's lawyer failed to investigate mitigating evidence before sentencing"
+    relevant:
+      - {source_id: "cap-3644230"}    # Sears v. Upton (No. 09-8854)
+  - query: "may a habeas court overturn a conviction based on an expert report criticizing the DNA evidence written years after trial"
+    relevant:
+      - {source_id: "cap-3639161"}    # McDaniel v. Brown (No. 08-559)
+  - query: "must a RICO association-in-fact enterprise have a structure beyond the pattern of racketeering it engages in"
+    relevant:
+      - {source_id: "cap-3653895"}    # Boyle v. United States (No. 07-1309)
+  - query: "can a party recover paralegal fees at market rates rather than at what they cost the attorney"
+    relevant:
+      - {source_id: "cap-3673829"}    # Richlin Security Service Co. v. Chertoff (No. 06-1717)
+  - query: "may a payphone operator sue a long-distance carrier in federal court for refusing to pay compensation the FCC requires"
+    relevant:
+      - {source_id: "cap-3556217"}    # Global Crossing Telecommunications v. Metrophones (No. 05-705)
+  - query: "is it automatically illegal price fixing for a lawful joint venture to set a single price for the products it sells"
+    relevant:
+      - {source_id: "cap-3276255"}    # Texaco Inc. v. Dagher (No. 04-805)
+  - query: "can a corporation's sole shareholder sue for racial discrimination in contracts the corporation made"
+    relevant:
+      - {source_id: "cap-5992113"}    # Domino's Pizza, Inc. v. McDonald (No. 04-593)
+  - query: "what is the maximum statutory damages award for a Truth in Lending Act violation on a car loan"
+    relevant:
+      - {source_id: "cap-5956351"}    # Koons Buick Pontiac GMC v. Nigh (No. 03-377)
+  - query: "which statute of limitations governs a discrimination claim created by the Civil Rights Act of 1991"
+    relevant:
+      - {source_id: "cap-5870337"}    # Jones v. R. R. Donnelley & Sons Co. (No. 02-1205)
+  - query: "how is retrogression measured when a state submits a redistricting plan for preclearance under the Voting Rights Act"
+    relevant:
+      - {source_id: "cap-8898256"}    # Georgia v. Ashcroft (No. 02-182)
+  - query: "may an unnamed class member who objected at the fairness hearing appeal approval of a settlement without intervening"
+    relevant:
+      - {source_id: "cap-1254780"}    # Devlin v. Scardelletti (No. 01-417)
+  - query: "does the Indian Gaming Regulatory Act exempt tribes from federal wagering excise taxes"
+    relevant:
+      - {source_id: "cap-9108010"}    # Chickasaw Nation v. United States (No. 00-507)
+  - query: "does due process bar applying a court decision abolishing the year and a day rule to conduct that came before it"
+    relevant:
+      - {source_id: "cap-9301453"}    # Rogers v. Tennessee (No. 99-6218)
+  - query: "does a blanket primary letting voters of any party choose a party's nominee violate the First Amendment"
+    relevant:
+      - {source_id: "cap-9413964"}    # California Democratic Party v. Jones (No. 99-401)
+  - query: "is a jury instruction that omits an element of the offense subject to harmless error review"
+    relevant:
+      - {source_id: "cap-1248184"}    # Neder v. United States (No. 97-1985)
+  - query: "does a union violate its duty of fair representation by tracking the statutory language of a union security clause"
+    relevant:
+      - {source_id: "cap-11076311"}   # Marquez v. Screen Actors Guild (No. 97-1056)
+  - query: "may an appeals court order a reduced damages award without offering the plaintiff a new trial"
+    relevant:
+      - {source_id: "cap-11503428"}   # Hetzel v. Prince William County (No. 97-954)
+  - query: "do the 1996 habeas corpus amendments apply to noncapital petitions already pending when the law passed"
+    relevant:
+      - {source_id: "cap-915758"}     # Lindh v. Murphy (No. 96-6298)
+  - query: "are punitive damages from a personal injury lawsuit excluded from taxable gross income"
+    relevant:
+      - {source_id: "cap-11594850"}   # O'Gilvie v. United States (No. 95-966)
+  - query: "may a national bank charge cardholders late fees allowed in its home state but banned where the cardholder lives"
+    relevant:
+      - {source_id: "cap-11746523"}   # Smiley v. Citibank (South Dakota) (No. 95-860)
+  - query: "may a public school district require random urine drug testing of students who play sports"
+    relevant:
+      - {source_id: "cap-1564392"}    # Vernonia School District 47J v. Acton (No. 94-590)
+  - query: "what should a habeas judge do when in grave doubt whether a constitutional trial error was harmless"
+    relevant:
+      - {source_id: "cap-1330548"}    # O'Neal v. McAninch (No. 93-7407)
+  - query: "does a statewide use tax that exceeds local sales tax rates discriminate against interstate commerce"
+    relevant:
+      - {source_id: "cap-1147098"}    # Associated Industries v. Lohman (No. 93-397)
+  - query: "can a coconspirator challenge a search because he supervised the conspiracy or controlled the property searched"
+    relevant:
+      - {source_id: "cap-11784"}      # United States v. Padilla (No. 92-207)
+  - query: "may the federal government recover state taxes it says were wrongfully assessed against its private contractor"
+    relevant:
+      - {source_id: "cap-6237931"}    # United States v. California (No. 91-2003)
+  - query: "may a state impose a disposal fee only on hazardous waste generated outside the state"
+    relevant:
+      - {source_id: "cap-11729096"}   # Chemical Waste Management v. Hunt (No. 91-471)
+  - query: "may release bonds for aliens awaiting a deportation decision forbid them from working"
+    relevant:
+      - {source_id: "cap-6221371"}    # INS v. National Center for Immigrants' Rights (No. 90-1090)
+  - query: "does letting the Attorney General temporarily schedule a new drug unconstitutionally delegate legislative power"
+    relevant:
+      - {source_id: "cap-6219461"}    # Touby v. United States (No. 90-6282)
+  - query: "is a notice of appeal filed after a bench ruling but before entry of judgment effective"
+    relevant:
+      - {source_id: "cap-6223247"}    # Firstier Mortgage Co. v. Investors Mortgage Insurance (No. 89-1063)
+  - query: "was the agency's decision to restore terminated pension plans arbitrary and capricious"
+    relevant:
+      - {source_id: "cap-12125138"}   # Pension Benefit Guaranty Corp. v. LTV Corp. (No. 89-390)
+  - query: "must a federal agency bargain over subjecting compliance with a budget office circular to grievance procedures"
+    relevant:
+      - {source_id: "cap-4885"}       # Department of the Treasury v. FLRA (No. 88-2123)
+  - query: "does the Federal Advisory Committee Act apply to the bar association committee that advises on judicial nominees"
+    relevant:
+      - {source_id: "cap-6215707"}    # Public Citizen v. United States Department of Justice (No. 88-429)
+  - query: "may a state forbid the governing bodies of political parties from endorsing candidates in primaries"
+    relevant:
+      - {source_id: "cap-12031909"}   # Eu v. San Francisco County Democratic Central Committee (No. 87-1269)
+  - query: "does a state notice-of-claim requirement apply to a federal civil rights suit filed in state court"
+    relevant:
+      - {source_id: "cap-1775015"}    # Felder v. Casey (No. 87-526)
+  - query: "does serving a foreign parent company through its domestic subsidiary satisfy the Hague Service Convention"
+    relevant:
+      - {source_id: "cap-6222967"}    # Volkswagenwerk Aktiengesellschaft v. Schlunk (No. 86-1052)

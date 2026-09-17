@@ -1,0 +1,82 @@
+# GENERATED FILE — do not edit by hand.
+#
+# Category term_of_art at document level: ordinals stripped, one entry per distinct source_id.
+#
+# Source:  evals/retrieval/labels-scotus-cap-stratified.yaml (all labels are unreviewed drafts; see that file's header)
+# Corpus:  data/corpus/scotus-cap-dedup.jsonl, chunk offsets from the agentd database
+# Command: go run ./cmd/evalstrat convert 
+#
+# Paragraph-level labels were mapped to every chunk whose [char_start, char_end)
+# overlaps the paragraph's byte span; each paragraph label is one relevant
+# entry, so recall counts paragraphs, not chunks. Document-level labels keep
+# source_id only. No thresholds: this file reports numbers, it does not gate.
+# Mapping checks: mapping-checks.json in this directory.
+
+cases:
+  - query: does a prisoner who files an untimely grievance satisfy the proper exhaustion requirement
+    relevant:
+      - source_id: cap-3500482
+      - source_id: cap-3553543
+  - query: can a nonparty be bound by a prior judgment under a theory of virtual representation
+    relevant:
+      - source_id: cap-3674228
+      - source_id: cap-4335674
+  - query: when does judicial estoppel prevent a party from taking a position inconsistent with one a court previously accepted
+    relevant:
+      - source_id: cap-9302102
+      - source_id: cap-3276046
+      - source_id: cap-3582065
+  - query: can a federal court remand a suit for damages to state court under Burford abstention
+    relevant:
+      - source_id: cap-11746454
+      - source_id: cap-1248520
+  - query: does the Rooker-Feldman doctrine divest a federal court of jurisdiction over a parallel suit once the state court enters judgment
+    relevant:
+      - source_id: cap-5920496
+      - source_id: cap-6006747
+  - query: is the in pari delicto defense available against an investor suing to rescind a purchase of unregistered securities
+    relevant:
+      - source_id: cap-6222106
+  - query: can a lawsuit filed with probable cause lose Noerr antitrust immunity under the sham exception because of anticompetitive motive
+    relevant:
+      - source_id: cap-11789
+      - source_id: cap-1254794
+      - source_id: cap-12706997
+      - source_id: cap-4335054
+  - query: must evidence be suppressed when police violate the knock-and-announce rule while executing a valid warrant
+    relevant:
+      - source_id: cap-3276422
+  - query: can a federal tax lien attach to one spouse's interest in property held as tenants by the entirety
+    relevant:
+      - source_id: cap-354232
+      - source_id: cap-5907297
+  - query: when is an abbreviated quick look analysis enough to condemn a professional association's advertising restrictions
+    relevant:
+      - source_id: cap-11133724
+      - source_id: cap-3276255
+      - source_id: cap-12698465
+  - query: may a sentencing court use the modified categorical approach when the statute of conviction is indivisible
+    relevant:
+      - source_id: cap-12698469
+      - source_id: cap-12706988
+  - query: does the plain statement rule keep the ADEA from reaching a state constitution's mandatory retirement age for appointed judges
+    relevant:
+      - source_id: cap-1108302
+      - source_id: cap-1339193
+      - source_id: cap-5883694
+  - query: can a prior fraud judgment have collateral estoppel effect in a bankruptcy dischargeability proceeding
+    relevant:
+      - source_id: cap-6223600
+      - source_id: cap-323790
+      - source_id: cap-9030733
+  - query: does due process allow res judicata to bar taxpayers who were not parties to an earlier suit against the same county tax
+    relevant:
+      - source_id: cap-11746778
+      - source_id: cap-11132941
+      - source_id: cap-3674228
+  - query: can a habeas lawyer's egregious misconduct justify equitable tolling of AEDPA's one-year deadline
+    relevant:
+      - source_id: cap-3641601
+      - source_id: cap-3553684
+      - source_id: cap-12186229
+      - source_id: cap-12187257

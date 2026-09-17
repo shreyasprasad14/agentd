@@ -40,6 +40,7 @@ func seedSearchCorpus(t *testing.T, st *store.Store, f embed.Embedder) {
 			[]store.Chunk{{Ordinal: 0, Content: content, Embedding: vecs[0], EmbeddingModel: f.Model()}})
 		require.NoError(t, err)
 	}
+	require.NoError(t, st.RefreshLexicalStats(ctx))
 }
 
 func newSearcher(t *testing.T) (*Searcher, *store.Store) {

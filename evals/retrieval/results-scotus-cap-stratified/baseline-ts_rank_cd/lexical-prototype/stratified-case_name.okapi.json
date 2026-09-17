@@ -1,0 +1,17 @@
+{
+  "variant": "okapi",
+  "labels": "evals/retrieval/generated/stratified-case_name.yaml",
+  "k1": 1.2,
+  "b": 0.75,
+  "cases": 17,
+  "modes": [
+    {
+      "mode": "bm25",
+      "recall_at_8": 0.8311624649859946,
+      "recall_at_20": 0.9416666666666667,
+      "recall_at_50": 0.9686274509803923,
+      "mrr": 0.9103641456582633,
+      "elapsed_ns": 20305362917
+    }
+  ]
+}

@@ -1,0 +1,48 @@
+{
+  "cases": 40,
+  "modes": [
+    {
+      "mode": "vector",
+      "recall_at_8": 1,
+      "recall_at_20": 1,
+      "recall_at_50": 1,
+      "mrr": 0.9416666666666667,
+      "elapsed_ns": 5872170500
+    },
+    {
+      "mode": "bm25",
+      "recall_at_8": 1,
+      "recall_at_20": 1,
+      "recall_at_50": 1,
+      "mrr": 0.9270833333333334,
+      "elapsed_ns": 35182203708
+    },
+    {
+      "mode": "hybrid",
+      "recall_at_8": 1,
+      "recall_at_20": 1,
+      "recall_at_50": 1,
+      "mrr": 0.9083333333333332,
+      "elapsed_ns": 35713219125
+    },
+    {
+      "mode": "hybrid+rerank",
+      "recall_at_8": 1,
+      "recall_at_20": 1,
+      "recall_at_50": 1,
+      "mrr": 0.8695833333333333,
+      "elapsed_ns": 2512687813584
+    }
+  ],
+  "corpus": {
+    "documents": 2484,
+    "chunks": 70736,
+    "embedding_models": [
+      "mxbai-embed-large"
+    ]
+  },
+  "embedding_model": "mxbai-embed-large",
+  "rerank_model": "qwen2.5:7b",
+  "labels": "evals/retrieval/generated/stratified-paraphrase.yaml",
+  "generated_at": "2026-09-16T20:54:09.280619Z"
+}

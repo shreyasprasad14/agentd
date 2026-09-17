@@ -14,6 +14,7 @@ import (
 	"github.com/shreyasprasad/agentd/internal/model/anthropic"
 	"github.com/shreyasprasad/agentd/internal/model/local"
 	"github.com/shreyasprasad/agentd/internal/retrieval"
+	"github.com/shreyasprasad/agentd/internal/retrieval/caselaw"
 	"github.com/shreyasprasad/agentd/internal/retrieval/courtlistener"
 	"github.com/shreyasprasad/agentd/internal/retrieval/embed"
 	"github.com/shreyasprasad/agentd/internal/retrieval/eval"
@@ -174,6 +175,73 @@ func fetchCmd(ctx context.Context, args []string) error {
 	})
 	log.Info("fetch done", "emitted", sum.Emitted, "skipped_existing", sum.SkippedExisting,
 		"skipped_empty", sum.SkippedEmpty, "skipped_no_lead", sum.SkippedNoLead, "file", path)
+	return err
+}
+
+// fetchCAPCmd pulls opinions from the Caselaw Access Project's static files
+// into the same JSONL `agentd fetch` writes, resuming from whatever the file
+// already holds.
+//
+// It is a second producer of one format rather than a change to the pipeline —
+// the boundary ADR-17 named when it called the corpus source swappable. Why
+// there are two: CourtListener is current to the day but its free tier allows
+// 125 requests a day against roughly two per opinion, which caps a pull near 60
+// documents; CAP is a CDN with no quota and one request per volume, but stops
+// at 2014. For a retrieval benchmark, depth beats recency. See ADR-40.
+func fetchCAPCmd(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("fetch-cap", flag.ExitOnError)
+	reporter := fs.String("reporter", "us", "CAP reporter slug (us, f2d, f3d, ...)")
+	court := fs.String("court", "scotus", "value written to each document's court field")
+	limit := fs.Int("limit", 2500, "stop after this many opinions (0 = no cap)")
+	minChars := fs.Int("min-chars", caselaw.DefaultMinChars, "shortest opinion to emit; drops cert denials and orders")
+	minYear := fs.Int("min-year", 0, "stop at volumes ending before this year (0 = walk them all)")
+	out := fs.String("out", "", "output JSONL path (default data/corpus/<court>-cap.jsonl)")
+	baseURL := fs.String("base-url", envOr("CAP_URL", caselaw.DefaultBaseURL), "CAP static file root")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	log := newLogger("fetch-cap")
+	path := *out
+	if path == "" {
+		path = filepath.Join("data", "corpus", *court+"-cap.jsonl")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+
+	// Resume: skip cases already in the output file.
+	skip := map[string]bool{}
+	if f, err := os.Open(path); err == nil {
+		docs, err := retrieval.ReadJSONL(f)
+		f.Close()
+		if err != nil {
+			return fmt.Errorf("%s exists but is not readable JSONL: %w", path, err)
+		}
+		for _, d := range docs {
+			skip[d.SourceID] = true
+		}
+		if len(skip) > 0 {
+			log.Info("resuming fetch", "already_have", len(skip), "file", path)
+		}
+	}
+
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	client := caselaw.New(*baseURL, log)
+	enc := json.NewEncoder(file)
+	sum, err := client.Fetch(ctx, caselaw.FetchOptions{
+		Reporter: *reporter, Court: *court, Limit: *limit,
+		MinChars: *minChars, MinYear: *minYear, Skip: skip,
+	}, func(d retrieval.InputDoc) error {
+		return enc.Encode(d)
+	})
+	log.Info("fetch done", "emitted", sum.Emitted, "volumes", sum.Volumes,
+		"skipped_existing", sum.SkippedExisting, "skipped_short", sum.SkippedShort,
+		"skipped_no_opinion", sum.SkippedNoOpinion, "file", path)
 	return err
 }
 

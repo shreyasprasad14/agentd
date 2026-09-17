@@ -1,0 +1,101 @@
+# GENERATED FILE — do not edit by hand.
+#
+# Category case_name at document level: ordinals stripped, one entry per distinct source_id.
+#
+# Source:  evals/retrieval/labels-scotus-cap-stratified.yaml (all labels are unreviewed drafts; see that file's header)
+# Corpus:  data/corpus/scotus-cap-dedup.jsonl, chunk offsets from the agentd database
+# Command: go run ./cmd/evalstrat convert 
+#
+# Paragraph-level labels were mapped to every chunk whose [char_start, char_end)
+# overlaps the paragraph's byte span; each paragraph label is one relevant
+# entry, so recall counts paragraphs, not chunks. Document-level labels keep
+# source_id only. No thresholds: this file reports numbers, it does not gate.
+# Mapping checks: mapping-checks.json in this directory.
+
+cases:
+  - query: United States v. Bess federal tax lien attaches consequences to rights created under state law
+    relevant:
+      - source_id: cap-354232
+      - source_id: cap-9476074
+  - query: Brown v. Felsen consent judgment and whether a bankruptcy court can look behind it to find fraud
+    relevant:
+      - source_id: cap-9030733
+      - source_id: cap-323790
+      - source_id: cap-6223600
+  - query: Baxter v. Palmigiano adverse inference from refusal to testify in civil or prison disciplinary proceedings
+    relevant:
+      - source_id: cap-1254852
+      - source_id: cap-11133167
+      - source_id: cap-11503514
+      - source_id: cap-11471404
+      - source_id: cap-13683
+      - source_id: cap-9508173
+  - query: Garrity v. New Jersey public employees forced to choose between self-incrimination and losing their jobs
+    relevant:
+      - source_id: cap-12698466
+      - source_id: cap-1254852
+  - query: United States v. Nardello generic definition of extortion regardless of state label
+    relevant:
+      - source_id: cap-9191165
+      - source_id: cap-634101
+      - source_id: cap-3573210
+      - source_id: cap-11728850
+  - query: Leng May Ma v. Barber alien paroled into the country has not entered the United States
+    relevant:
+      - source_id: cap-355876
+      - source_id: cap-9313599
+      - source_id: cap-5884234
+      - source_id: cap-6228898
+  - query: Myers v. Bethlehem Shipbuilding Corp. exhaustion of administrative remedies before judicial relief
+    relevant:
+      - source_id: cap-3500482
+      - source_id: cap-6222886
+      - source_id: cap-6227285
+      - source_id: cap-12032774
+  - query: Tennessee Coal v. Muscoda definition of work under the Fair Labor Standards Act
+    relevant:
+      - source_id: cap-5923137
+      - source_id: cap-5910239
+      - source_id: cap-5044
+  - query: Hagans v. Lavine jurisdictional questions decided sub silentio are not binding precedent
+    relevant:
+      - source_id: cap-5917929
+      - source_id: cap-6210401
+      - source_id: cap-9300919
+  - query: Carlson v. Landon Attorney General discretion to detain deportable aliens without bail
+    relevant:
+      - source_id: cap-6228898
+      - source_id: cap-9031152
+      - source_id: cap-6214309
+      - source_id: cap-9313599
+      - source_id: cap-6221371
+  - query: Heikkila v. Barber habeas corpus review of deportation orders when statutory review is precluded
+    relevant:
+      - source_id: cap-9313153
+      - source_id: cap-9313599
+  - query: Lonchar v. Thomas dismissing a first federal habeas petition filed at the eleventh hour
+    relevant:
+      - source_id: cap-11744701
+      - source_id: cap-3275461
+  - query: Sims v. Apfel issue exhaustion in a request for Appeals Council review
+    relevant:
+      - source_id: cap-9413232
+      - source_id: cap-3500482
+  - query: United States v. Murdock willfully means a bad purpose in criminal tax statutes
+    relevant:
+      - source_id: cap-6221945
+      - source_id: cap-11181885
+      - source_id: cap-3573430
+  - query: Ott v. Mississippi Valley Barge Line fairly apportioned state property tax on vessels
+    relevant:
+      - source_id: cap-3657928
+  - query: Kwong Hai Chew v. Colding resident alien is a person protected by the Fifth Amendment
+    relevant:
+      - source_id: cap-11182943
+      - source_id: cap-5121
+      - source_id: cap-9313599
+      - source_id: cap-355876
+  - query: Houghton v. Shafer prisoner need not pursue a futile administrative appeal
+    relevant:
+      - source_id: cap-6222886
+      - source_id: cap-6218684

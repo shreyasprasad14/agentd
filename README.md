@@ -11,7 +11,7 @@ step, without re-executing the tool call that was already finished. Everything e
 sandboxing, budgets, hybrid retrieval, tracing, the eval harness — is built on that one property.
 
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — how it works, as it stands
-- **[docs/DECISIONS.md](docs/DECISIONS.md)** — 39 ADRs: the tradeoffs, already made
+- **[docs/DECISIONS.md](docs/DECISIONS.md)** — 41 ADRs: the tradeoffs, already made
 - **[docs/SECURITY.md](docs/SECURITY.md)** — the threat model, including what is *not* defended
 - **[docs/MILESTONES.md](docs/MILESTONES.md)** — the build journal, and the defects the evals caught
 
@@ -22,7 +22,7 @@ sandboxing, budgets, hybrid retrieval, tracing, the eval harness — is built on
 | **Durability** | Event-sourced runs over Postgres; leases, fencing, an idempotency ledger. `kill -9` a worker mid-tool-call and the run continues, exactly once |
 | **Isolation** | Every `run_python` call in a fresh container: no network, read-only rootfs, dropped capabilities, cgroup limits |
 | **Tools** | One `Tool` interface over builtins, the sandbox, and **MCP servers** (stdio or HTTP), namespaced and allowlisted per run |
-| **Retrieval** | Hybrid pgvector + BM25 with reciprocal rank fusion, over real court opinions; fusion beats both inputs on MRR, and the optional LLM reranking pass is measured and reported as a loss |
+| **Retrieval** | Hybrid pgvector + BM25 with reciprocal rank fusion, over real court opinions. Measured per query type: BM25 clearly leads on case-name queries, no mode clearly leads on the others, and the optional LLM reranking pass is reported with its costs |
 | **Control** | Per-run token and dollar budgets enforced as a pre-flight ceiling; cancellation that interrupts in-flight work |
 | **Observability** | One OpenTelemetry trace per run, across processes and crashes; Prometheus on both binaries; a live trajectory viewer |
 | **Evals** | Cassette replay plus a live mode, scoring retrieval, citations, injection resistance, sandbox safety, crash recovery, and budgets |
@@ -210,71 +210,104 @@ spent (ADR-23).
 ## Retrieval numbers
 
 `make eval-retrieval` runs every labeled query in all four modes and exits nonzero below the
-thresholds in `evals/retrieval/labels.yaml`. The rows are the same code path with steps skipped,
+thresholds in the label file it scores. The rows are the same code path with steps skipped,
 so the `hybrid` row is literally what the tool does.
 
-The first run reported BM25 recall@8 of **0.154**. That was not a weak baseline, it was a bug:
-`websearch_to_tsquery` ANDs its terms, which is right for a search box and wrong for an agent that
-sends a whole question. Same corpus, same labels, after the fix: **1.000**. That is the entire
-argument for scoring retrieval separately from answer quality.
+The corpus is from the Caselaw Access Project: 2,484 SCOTUS merits opinions from 1988–2014,
+70,736 chunks. Lexical search is Okapi BM25 computed in SQL (ADR-41). Two query sets are
+measured against it.
 
-Against a real CourtListener corpus — 84 SCOTUS cases, 13,114 chunks, 40 labeled queries
-(`evals/retrieval/labels-scotus.yaml`, `results-scotus.json`):
+### The 40-query benchmark (paraphrased questions)
+
+`evals/retrieval/labels-scotus-cap.yaml`. Labels are document-level: a hit on any chunk of the
+right opinion counts. These are the same 40 cases scored as the `paraphrase` category below.
+Results are in `results-scotus-cap-stratified/stratified-paraphrase.json`.
 
 | mode | recall@8 | recall@20 | recall@50 | MRR | wall time |
 |---|---|---|---|---|---|
-| vector | 1.000 | 1.000 | 1.000 | 0.963 | 2.5 s |
-| bm25 | 0.950 | 1.000 | 1.000 | 0.830 | 2.3 s |
-| hybrid | 1.000 | 1.000 | 1.000 | **0.988** | 2.8 s |
-| hybrid+rerank | 1.000 | 1.000 | 1.000 | 0.971 | 1,984 s |
+| vector | **1.000** | 1.000 | 1.000 | **0.942** | 6 s |
+| bm25 | **1.000** | 1.000 | 1.000 | 0.927 | 35 s |
+| hybrid | **1.000** | 1.000 | 1.000 | 0.908 | 36 s |
+| hybrid+rerank | **1.000** | 1.000 | 1.000 | 0.870 | 2,513 s |
 
-**Two things in that table are worth more than the rest of it.**
+**Every mode finds every case, so this set no longer separates the modes.** Vector keeps the best
+MRR, but its lead over BM25 is 0.015: about half a case out of 40. Recall saturates because each
+query is written from its opinion's own statement of the question, so it carries that opinion's
+distinctive language. That made the task easy regardless of corpus depth: growing the corpus 30×
+did not break the saturation. The stratified set below was built to fix that.
 
-**The LLM reranker makes ranking worse, and costs 713× the wall time to do it.** Hybrid's MRR is
-0.988; reranking it drops it to 0.971, for 1,984 seconds against 2.8. This is a measured negative
-and it is reported as one. [ADR-23](docs/DECISIONS.md) deferred a cross-encoder reranker on price;
-this converts that from a price argument into a measured one, which is strictly stronger. A 7B
-local model asked to re-order eight already-good hits mostly finds new ways to be wrong.
+**An earlier version of this table said fusion hurts because "BM25 degrades at depth". That was
+wrong.** The lexical mode then ranked with `ts_rank_cd`, which ignores term rarity, so common
+words like `v.` and `state` drowned out rare, distinctive ones. It scored 0.850 recall@8 and 0.608
+MRR here, and fusion averaged that broken list into the vector ranking. Replacing only the
+ranking with BM25 brought lexical to 1.000 / 0.927, and hybrid to 1.000 / 0.908 (ADR-41).
 
-**Hybrid genuinely beats both of its components, but only on MRR.** 0.988 against vector's 0.963
-and BM25's 0.830 — the fusion puts the right paragraph first more often than either input does.
-Recall@8 cannot show this because it saturates, which brings us to the caveat.
+### The stratified set (query types that stress exact terms)
 
-**The corpus is 30× smaller than it should be, and recall@k saturates because of it.**
-CourtListener's daily quota cut the pull off at 109 documents where the plan budgeted 2,500. Top-8
-out of 84 documents is the top 9.5% of the corpus; the design assumed 0.3%. So `recall@8` is
-1.000 for three of four modes for the same reason the 12-opinion fixture saturated, and **MRR is
-the only column here that discriminates.** Reproduce with a corpus of a few thousand and the
-recall columns start to mean something:
+`evals/retrieval/labels-scotus-cap-stratified.yaml` adds 63 cases, in four categories, to the 40
+paraphrases:
+- **citation:** the query includes a statute or reporter citation.
+- **case_name:** the query names a case that corpus opinions cite.
+- **term_of_art:** the query is built around a legal term.
+- **mixed:** a conceptual question that also names a citation or case.
+
+Labels for these are **paragraph-level**: a hit must be the specific paragraph. So their recall
+measures a harder task than paraphrase's, and the rows cannot be compared across that line.
+**All 63 new labels are unreviewed drafts.** Full report, with document-level results, per-case
+ranks and suspected label issues: [`REPORT.md`](evals/retrieval/results-scotus-cap-stratified/REPORT.md).
+
+recall@8 / MRR:
+
+| category | n | vector | bm25 | hybrid | hybrid+rerank |
+|---|---:|---|---|---|---|
+| paraphrase *(document-level)* | 40 | **1.000** / **0.942** | **1.000** / 0.927 | **1.000** / 0.908 | **1.000** / 0.870 |
+| citation | 16 | 0.623 / 0.682 | **0.713** / 0.760 | 0.601 / 0.776 | **0.713** / **0.802** |
+| case_name | 17 | 0.516 / 0.898 | **0.831** / 0.910 | 0.670 / **0.916** | 0.584 / 0.652 |
+| term_of_art | 15 | 0.404 / 0.636 | 0.460 / 0.730 | 0.423 / **0.735** | **0.531** / 0.607 |
+| mixed | 15 | 0.584 / 0.752 | 0.607 / 0.844 | **0.627** / 0.856 | **0.627** / **0.872** |
+
+With 15–17 cases per category, a gap under about 1.5 cases' worth (lead × n) is not treated as a
+difference.
+
+- **BM25 is the clear winner on case names.** Its recall@8 beats hybrid by 0.161 (2.7 cases' worth)
+  and vector by 0.315 (5.4), and it is never worse than hybrid in any case. This is the only lead
+  in the table that is both large and consistent case by case.
+- **Elsewhere there is no meaningful winner.** Citation and mixed are exact ties at the top, and
+  term_of_art's spread is about one case.
+- **Vector search is never ahead on the new categories.** It trails the best mode on MRR in all
+  four, and on recall@8 in citation and case_name. On paraphrase it ties or leads.
+- **Fusion dilutes BM25 where BM25 is strong.** On case_name, hybrid recall@8 (0.670) sits between
+  its two inputs. RRF weights both lists by rank alone, so it cannot tell which one to trust for a
+  given query (ADR-18). That is now a measured cost, no longer a hypothesis.
+- **The reranker's MRR losses look like reshuffling within the right opinion.** On case_name its
+  count of first-label-at-rank-1 falls from 15 to 8. But in 11 of the 13 cases where it demotes a
+  label, its new top result is an unlabeled paragraph of a labeled opinion, and several of those
+  read as on point. At document level it puts a relevant opinion first in 57 of 63 cases. This
+  can't be scored as a loss until the draft labels are reviewed.
+
+Reproduce:
 
 ```bash
-export COURTLISTENER_TOKEN=...
-make fetch-corpus COURT=scotus LIMIT=2500   # ~30 min, resumable; has a daily quota
-make dedupe                                 # collapse revisions of the same case (ADR-39)
-make ingest CORPUS=data/corpus/scotus-dedup.jsonl   # ~11 chunks/sec; resumable by content hash
+make fetch-cap COURT=scotus LIMIT=2500   # ~85 s, no token, no quota (ADR-40)
+make dedupe                              # collapse revisions of the same case (ADR-39)
+make ingest                              # ~17 chunks/sec, ~70 min; resumable; refreshes BM25 statistics
 agentd eval retrieval -label "your query"   # prints top-20 hits to hand-label
-make eval-retrieval
+make eval-retrieval                      # the 40-query benchmark
+
+go run ./cmd/evalstrat convert           # stratified labels -> chunk-ordinal label files, with mapping checks
+for f in paraphrase citation case_name term_of_art mixed; do
+  make eval-retrieval LABELS=evals/retrieval/generated/stratified-$f.yaml \
+                      RESULTS=evals/retrieval/results-scotus-cap-stratified/stratified-$f.json
+done
 ```
 
-**Why `make dedupe` is in that sequence.** CourtListener publishes each revision of an opinion
-under its own id: the 109 documents pulled covered only 84 distinct cases, and *Trump v. CASA*
-appeared five times — 10.8% of the corpus by itself. Against the raw pull there is no honest
-labeling, only a choice between two biases: name one id and its own revisions score as misses;
-name all of them and a query gets five chances at top-8. Deduplicating removes the choice, which
-is why the label file names exactly one relevant document per query. Note that content hashing
-would not have caught any of this — all 109 texts differ, because a revision is a genuinely
-different document.
+The stratified run takes about 8 hours on a laptop, nearly all of it in the reranker.
 
-**And the queries were written by a model, not a lawyer.** Each was drawn from its own opinion's
-syllabus and never from search results, which is the anti-bias rule that matters most here. That
-makes this a well-constructed benchmark, not a human-labeled gold set.
+`results-scotus-cap.json` still holds the 40-query run from before the BM25 change: 0.850 / 0.608
+lexical, 0.950 / 0.866 hybrid, 1.000 / 0.877 reranked. The partial stratified run on `ts_rank_cd`
+is in `results-scotus-cap-stratified/baseline-ts_rank_cd/`. The previous CourtListener table is
+kept in `results-scotus.json` with the labels that produced it.
 
-The 12-opinion fixture (`labels.yaml`, `results.json`) is still checked in and still runs in
-seconds with no corpus pull. It saturates on every mode, but it catches real breakage — it is what
-caught the AND-semantics bug.
-
-Both results files carry the corpus size and the model names next to the numbers, so a table can
-be traced to the run that produced it.
 
 ## Tests
 
@@ -311,14 +344,14 @@ propagation, schema bounds) is covered without Docker.
 ## Layout
 
 ```
-cmd/agentd/            # serve | work | migrate | fetch | ingest | eval
+cmd/agentd/            # serve | work | migrate | fetch | fetch-cap | dedupe | ingest | eval
 internal/api/          # handlers, SSE tail, config normalisation; ui/ (the embedded viewer)
 internal/runtime/      # event payloads, Reduce, the loop, worker (claim/heartbeat/reaper)
 internal/model/        # Provider interface, pricing, request fingerprint, Router; local/, anthropic/, fake/, cassette/ (record + replay)
 internal/evals/        # suite parsing, the case runner and its chaos hook, the assertion vocabulary, citations, scorecard
 internal/tools/        # Tool interface, registry + schema validation; builtin/, python/ (sandboxed), corpus/ (retrieval), mcp/ (external, + its in-repo test server)
 internal/sandbox/      # Executor interface, Docker executor, limits, output capping, safety tests
-internal/retrieval/    # Searcher + RRF; chunk/, embed/ (Ollama + fake), courtlistener/, rerank/, eval/
+internal/retrieval/    # Searcher + RRF; chunk/, embed/ (Ollama + fake), caselaw/ + courtlistener/ (two corpus sources, one JSONL), rerank/, eval/
 internal/store/        # Postgres access, fenced writes, ledger, corpus queries, embedded migrations
 internal/telemetry/    # tracer setup, span helpers + names, the root-span ID generator, slog correlation, Prometheus instruments
 internal/testutil/     # shared testcontainers Postgres fixture
@@ -353,12 +386,27 @@ no lease fencing, because ingest is idempotent by content hash where a tool call
 a CLI operation because of the invariant, not for want of a mechanism. Loading a corpus is an
 operator action anyway.
 
-A cross-encoder reranker is a second implementation of `rerank.Reranker`, deferred on price with
-the numbers behind it — and now with a stronger reason to wait: the LLM reranking pass that exists
-is a measured loss on the corpus we have, costing 713× hybrid's wall time to lower MRR (ADR-23).
-Reranking is worth revisiting when the corpus is deep enough that recall@8 stops saturating, which
-is the same condition that would make a cross-encoder worth pricing.
+A cross-encoder reranker would be a second implementation of `rerank.Reranker`, and it is deferred
+on price, with the numbers behind that. The LLM reranking pass that exists costs 60–70× hybrid's
+wall time. On the stratified set it leads or ties on recall@8 in citation, term_of_art and mixed,
+but trails on MRR in case_name and term_of_art. Most of that shortfall looks like reordering
+paragraphs within the right opinion, which can't be scored until the draft labels are reviewed.
 
-Measuring retrieval at real scale is the one open item with a number attached: CourtListener's
-daily quota capped the corpus at 84 cases against the 2,500 planned, so the recall columns
-saturate and MRR carries the result — see [Retrieval numbers](#retrieval-numbers).
+Open items, in the order they unblock each other:
+
+1. **Review the 63 draft labels in the stratified set.** `REPORT.md` flags specific cases:
+   paragraphs that every mode ranks above the labels, and a note that misses short-form
+   citations. The per-category numbers, and whether the reranker's paragraph-level MRR loss is
+   real, depend on this review.
+2. **Score-aware fusion.** The mechanism behind fusion's losses is now measured, not guessed.
+   With BM25 fixed (ADR-41), RRF still drags case-name recall@8 from BM25's 0.831 down to 0.670,
+   because it weights both lists by rank alone (ADR-18). A fusion that knows which list to trust
+   for a given query is the next experiment. The eval already reports both input lists
+   separately, which is what makes that comparison possible.
+3. **Tokenizer normalization.** `evals/retrieval/TOKENIZER_NOTES.md` lists the gaps: spaced
+   `U. S. C.` vs compact, dropped `§`, OCR `(l)`. With BM25 they explain no individual miss, but
+   the compact `u.s.c` query token never matches a labeled paragraph. This should be measured on
+   its own, against the current numbers.
+4. **Lexical latency.** BM25 in SQL takes about 1 s per query, 1.5× slower than `ts_rank_cd`.
+   That doesn't matter under the reranker, but it is visible in `bm25` and `hybrid` modes. A native
+   index is the fix if it becomes the complaint.

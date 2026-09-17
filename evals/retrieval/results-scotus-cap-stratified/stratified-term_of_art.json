@@ -1,0 +1,48 @@
+{
+  "cases": 15,
+  "modes": [
+    {
+      "mode": "vector",
+      "recall_at_8": 0.40365079365079365,
+      "recall_at_20": 0.6293650793650793,
+      "recall_at_50": 0.7484126984126984,
+      "mrr": 0.6356349206349206,
+      "elapsed_ns": 2682000000
+    },
+    {
+      "mode": "bm25",
+      "recall_at_8": 0.4603174603174604,
+      "recall_at_20": 0.6900000000000001,
+      "recall_at_50": 0.8558730158730159,
+      "mrr": 0.73,
+      "elapsed_ns": 12765098459
+    },
+    {
+      "mode": "hybrid",
+      "recall_at_8": 0.4225396825396825,
+      "recall_at_20": 0.6561904761904761,
+      "recall_at_50": 0.9104761904761905,
+      "mrr": 0.7351851851851852,
+      "elapsed_ns": 13606748250
+    },
+    {
+      "mode": "hybrid+rerank",
+      "recall_at_8": 0.5306349206349207,
+      "recall_at_20": 0.746984126984127,
+      "recall_at_50": 0.9104761904761905,
+      "mrr": 0.6066666666666667,
+      "elapsed_ns": 802563436542
+    }
+  ],
+  "corpus": {
+    "documents": 2484,
+    "chunks": 70736,
+    "embedding_models": [
+      "mxbai-embed-large"
+    ]
+  },
+  "embedding_model": "mxbai-embed-large",
+  "rerank_model": "qwen2.5:7b",
+  "labels": "evals/retrieval/generated/stratified-term_of_art.yaml",
+  "generated_at": "2026-09-16T21:38:44.341019Z"
+}

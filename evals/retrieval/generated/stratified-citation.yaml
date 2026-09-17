@@ -1,0 +1,294 @@
+# GENERATED FILE — do not edit by hand.
+#
+# Category citation, paragraph labels mapped to chunk ordinals.
+#
+# Source:  evals/retrieval/labels-scotus-cap-stratified.yaml (all labels are unreviewed drafts; see that file's header)
+# Corpus:  data/corpus/scotus-cap-dedup.jsonl, chunk offsets from the agentd database
+# Command: go run ./cmd/evalstrat convert 
+#
+# Paragraph-level labels were mapped to every chunk whose [char_start, char_end)
+# overlaps the paragraph's byte span; each paragraph label is one relevant
+# entry, so recall counts paragraphs, not chunks. Document-level labels keep
+# source_id only. No thresholds: this file reports numbers, it does not gate.
+# Mapping checks: mapping-checks.json in this directory.
+
+cases:
+  - query: 15 U.S.C. § 1681m(a) when is an insurance rate increase based on a credit report
+    relevant:
+      - source_id: cap-3573430
+        ordinals:
+          - 17
+          - 18
+      - source_id: cap-3573430
+        ordinals:
+          - 18
+      - source_id: cap-3573430
+        ordinals:
+          - 19
+          - 20
+      - source_id: cap-3573430
+        ordinals:
+          - 20
+          - 21
+  - query: 28 U.S.C. § 994(h) maximum term authorized includes statutory recidivist enhancements
+    relevant:
+      - source_id: cap-11652916
+        ordinals:
+          - 0
+      - source_id: cap-11652916
+        ordinals:
+          - 8
+          - 9
+      - source_id: cap-11652916
+        ordinals:
+          - 9
+          - 10
+      - source_id: cap-11652916
+        ordinals:
+          - 11
+          - 12
+      - source_id: cap-3674133
+        ordinals:
+          - 12
+  - query: 42 U.S.C. § 1396p(a) anti-lien provision and a state's claim on a Medicaid beneficiary's tort settlement
+    relevant:
+      - source_id: cap-12407746
+        ordinals:
+          - 0
+      - source_id: cap-12407746
+        ordinals:
+          - 24
+      - source_id: cap-3276324
+        ordinals:
+          - 18
+      - source_id: cap-3276324
+        ordinals:
+          - 16
+          - 17
+      - source_id: cap-12407746
+        ordinals:
+          - 5
+  - query: 26 U.S.C. § 6321 federal tax lien on an inheritance the taxpayer disclaimed under state law
+    relevant:
+      - source_id: cap-9476074
+        ordinals:
+          - 0
+      - source_id: cap-9476074
+        ordinals:
+          - 0
+          - 1
+      - source_id: cap-9476074
+        ordinals:
+          - 14
+      - source_id: cap-9476074
+        ordinals:
+          - 13
+          - 14
+  - query: 11 U.S.C. § 523(a)(2)(A) what level of reliance must a creditor show
+    relevant:
+      - source_id: cap-323761
+        ordinals:
+          - 18
+      - source_id: cap-323761
+        ordinals:
+          - 0
+      - source_id: cap-323761
+        ordinals:
+          - 7
+          - 8
+      - source_id: cap-323761
+        ordinals:
+          - 22
+      - source_id: cap-3674023
+        ordinals:
+          - 27
+          - 28
+  - query: 8 U.S.C. § 1231(a)(6) detention of inadmissible aliens beyond the 90-day removal period
+    relevant:
+      - source_id: cap-3442797
+        ordinals:
+          - 7
+          - 8
+      - source_id: cap-3442797
+        ordinals:
+          - 0
+      - source_id: cap-9313599
+        ordinals:
+          - 12
+          - 13
+      - source_id: cap-9031152
+        ordinals:
+          - 20
+          - 21
+  - query: 28 U.S.C. § 636(b)(1)(B) prisoner petitions challenging conditions of confinement isolated incident
+    relevant:
+      - source_id: cap-6218684
+        ordinals:
+          - 0
+      - source_id: cap-6218684
+        ordinals:
+          - 5
+      - source_id: cap-6218684
+        ordinals:
+          - 7
+      - source_id: cap-9108401
+        ordinals:
+          - 11
+      - source_id: cap-9108401
+        ordinals:
+          - 11
+          - 12
+  - query: 11 U.S.C. § 522(l) trustee objection to claimed exemption after 30 days
+    relevant:
+      - source_id: cap-6237415
+        ordinals:
+          - 0
+      - source_id: cap-6237415
+        ordinals:
+          - 5
+      - source_id: cap-6237415
+        ordinals:
+          - 6
+          - 7
+      - source_id: cap-6237415
+        ordinals:
+          - 8
+          - 9
+      - source_id: cap-3641718
+        ordinals:
+          - 7
+  - query: 29 U.S.C. § 1103(c)(1) anti-inurement provision employer use of pension plan surplus
+    relevant:
+      - source_id: cap-11076610
+        ordinals:
+          - 12
+          - 13
+      - source_id: cap-11076610
+        ordinals:
+          - 11
+          - 12
+      - source_id: cap-11076610
+        ordinals:
+          - 3
+          - 4
+      - source_id: cap-5882913
+        ordinals:
+          - 26
+          - 27
+  - query: 21 U.S.C. § 802(44) felony drug offense state misdemeanor punishable by more than one year
+    relevant:
+      - source_id: cap-3674213
+        ordinals:
+          - 1
+      - source_id: cap-3674213
+        ordinals:
+          - 0
+      - source_id: cap-3674213
+        ordinals:
+          - 6
+      - source_id: cap-3674213
+        ordinals:
+          - 7
+  - query: 28 U.S.C. § 1915(d) is an in forma pauperis complaint that fails Rule 12(b)(6) automatically frivolous
+    relevant:
+      - source_id: cap-605680
+        ordinals:
+          - 0
+      - source_id: cap-605680
+        ordinals:
+          - 11
+          - 12
+      - source_id: cap-605680
+        ordinals:
+          - 6
+          - 7
+      - source_id: cap-11727595
+        ordinals:
+          - 7
+          - 8
+  - query: 42 U.S.C. § 406(b) contingent-fee agreement versus lodestar for Social Security attorney fees
+    relevant:
+      - source_id: cap-353782
+        ordinals:
+          - 0
+          - 1
+      - source_id: cap-353782
+        ordinals:
+          - 1
+      - source_id: cap-353782
+        ordinals:
+          - 22
+      - source_id: cap-353782
+        ordinals:
+          - 24
+      - source_id: cap-353782
+        ordinals:
+          - 7
+          - 8
+  - query: 28 U.S.C. § 1367(d) tolling for state-law claims against a nonconsenting State dismissed on Eleventh Amendment grounds
+    relevant:
+      - source_id: cap-9108418
+        ordinals:
+          - 22
+      - source_id: cap-9108418
+        ordinals:
+          - 17
+          - 18
+      - source_id: cap-9108418
+        ordinals:
+          - 0
+      - source_id: cap-9030949
+        ordinals:
+          - 14
+          - 15
+  - query: 28 U.S.C. § 1500 Court of Federal Claims jurisdiction when a suit on the same operative facts is pending in district court
+    relevant:
+      - source_id: cap-4225347
+        ordinals:
+          - 16
+      - source_id: cap-4225347
+        ordinals:
+          - 0
+      - source_id: cap-4225347
+        ordinals:
+          - 10
+          - 11
+      - source_id: cap-12197
+        ordinals:
+          - 0
+      - source_id: cap-12197
+        ordinals:
+          - 18
+          - 19
+  - query: 328 U.S. 680 walking time on the employer's premises before the workday
+    relevant:
+      - source_id: cap-5923137
+        ordinals:
+          - 1
+          - 2
+          - 3
+      - source_id: cap-5923137
+        ordinals:
+          - 16
+          - 17
+      - source_id: cap-12701987
+        ordinals:
+          - 2
+          - 3
+  - query: 18 U.S.C. § 3582(c)(2) does Booker make the sentence reduction policy statement advisory
+    relevant:
+      - source_id: cap-3641961
+        ordinals:
+          - 0
+          - 1
+      - source_id: cap-3641961
+        ordinals:
+          - 10
+          - 11
+      - source_id: cap-3641961
+        ordinals:
+          - 8
+      - source_id: cap-6023823
+        ordinals:
+          - 17
+          - 18

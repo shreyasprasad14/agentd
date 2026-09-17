@@ -1,0 +1,21 @@
+{
+  "generated_at": "2026-09-16T17:42:11.221324Z",
+  "source": "evals/retrieval/labels-scotus-cap-stratified.yaml",
+  "corpus": "data/corpus/scotus-cap-dedup.jsonl",
+  "cases": 103,
+  "documents_referenced": 161,
+  "paragraph_labels": 315,
+  "document_labels": 40,
+  "sha_checked": 161,
+  "sha_mismatches": [],
+  "missing_documents": [],
+  "ordinal_out_of_range": [],
+  "no_chunk_mapped": [],
+  "evidence_not_found_in_mapped_chunks": [],
+  "evidence_not_in_paragraph": [],
+  "chunks_per_paragraph_label_histogram": {
+    "1": 127,
+    "2": 167,
+    "3": 21
+  }
+}

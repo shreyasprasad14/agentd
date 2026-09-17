@@ -1,0 +1,17 @@
+{
+  "commit": "75c8c0db18e6487305467ccab2e623cab5ad2e2e",
+  "working_tree_dirty": true,
+  "started_at": "2026-09-16T20:10:58Z",
+  "lexical_ranker": "Okapi BM25, k1=1.2 b=0.75, statistics from migration 0004 materialized views (ADR-41)",
+  "ranker_files_sha256": {
+    "internal/store/corpus.go": "8191a8f70ccc3ffa3853a5e637f013d975ee1aa5dc79f6dcf373094947983bb2",
+    "internal/store/migrations/0004_lexical_stats.sql": "5dcfa610a56b975af78b2bdb8a3c6c1bdca22312f487ead6292d942c40869a4f",
+    "internal/retrieval/search.go": "9d3317545f70121dfa8c5cb96348ec8b4a7dfa27e5e6a195a832d936fc655b47",
+    "internal/retrieval/rrf.go": "3207cdc502729ee2b72bdb8341db1642c9b9b0c2c03491e1dfacafb388d4a867",
+    "internal/retrieval/rerank/llm.go": "f9aca1f36f70c08674d7d27c1a4a3e62902c74cfde1c4a35a5c74d78e8c52816"
+  },
+  "migrations_applied": "0001_init.sql,0002_corpus.sql,0003_trace.sql,0004_lexical_stats.sql",
+  "lexical_stats": "chunks=70736 avg_length=118.365",
+  "command": "make eval-retrieval LABELS=<file> RESULTS=<out>",
+  "ollama_models": {"models":[{"name":"mxbai-embed-large:latest","model":"mxbai-embed-large:latest","modified_at":"2026-09-09T17:40:06.331877349-04:00","size":669615493,"digest":"468836162de7f81e041c43663fedbbba921dcea9b9fefea135685a39b2d83dd8","details":{"parent_model":"","format":"gguf","family":"bert","families":["bert"],"parameter_size":"334M","quantization_level":"F16","context_length":512,"embedding_length":1024},"capabilities":["embedding"]},{"name":"qwen2.5:7b","model":"qwen2.5:7b","modified_at":"2026-09-03T20:19:24.990627155-04:00","size":4683087332,"digest":"845dbda0ea48ed749caafd9e6037047aa19acfcfd82e704d7ca97d631a0b697e","details":{"parent_model":"","format":"gguf","family":"qwen2","families":["qwen2"],"parameter_size":"7.6B","quantization_level":"Q4_K_M","context_length":32768,"embedding_length":3584},"capabilities":["completion","tools"]}]}
+}

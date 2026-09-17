@@ -128,8 +128,20 @@ func Ingest(ctx context.Context, st *store.Store, emb embed.Embedder, docs []Inp
 		}(doc)
 	}
 	wg.Wait()
+	if ctx.Err() != nil {
+		sum.Elapsed = time.Since(start)
+		return sum, ctx.Err()
+	}
+	// Lexical ranking reads corpus statistics that only a refresh updates.
+	// It runs even when every document was skipped, so a run interrupted
+	// before this point is repaired by the next one rather than leaving
+	// stale statistics that no later no-op ingest would fix.
+	if err := st.RefreshLexicalStats(ctx); err != nil {
+		sum.Elapsed = time.Since(start)
+		return sum, fmt.Errorf("refresh lexical stats: %w", err)
+	}
 	sum.Elapsed = time.Since(start)
-	return sum, ctx.Err()
+	return sum, nil
 }
 
 // errSkipped marks a document already ingested in this exact form.

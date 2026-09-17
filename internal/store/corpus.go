@@ -311,41 +311,105 @@ func (s *Store) SearchVector(ctx context.Context, embedding []float32, limit int
 	return hits, tx.Commit(ctx)
 }
 
-// lexicalQuerySQL builds the tsquery for a natural-language query: the
-// query is normalised into lexemes by the same dictionary that built the
-// index, and those lexemes are OR-ed.
-//
-// The obvious choice, websearch_to_tsquery, ANDs its terms, which is right
-// for a search box and wrong here: a model sends a whole question, and
-// requiring every one of ten lexemes to appear in a 1,200-character chunk
-// matches essentially nothing (measured: recall@8 of 0.15 against 0.85 for
-// this version). With OR, ts_rank_cd does the discriminating, and because it
-// is a cover-density rank it already scores chunks that contain the terms
-// together, in order, above chunks that merely mention them.
-//
-// quote_literal on each lexeme keeps operator characters from being parsed
-// as tsquery syntax.
-const lexicalQuerySQL = `to_tsquery('english',
-	(SELECT string_agg(quote_literal(lex), ' | ')
-	   FROM unnest(tsvector_to_array(to_tsvector('english', $1))) AS lex))`
+// BM25 parameters. These are the textbook defaults and were not tuned: the
+// only labels to tune against are drafts (ADR-41).
+const (
+	bm25K1 = 1.2
+	bm25B  = 0.75
+)
 
-// SearchLexical ranks chunks against a natural-language query. A query whose
-// every word is a stopword yields no lexemes and therefore no hits, rather
-// than an error.
+// lexicalSearchSQL ranks chunks against a natural-language query with Okapi
+// BM25. Placeholders: $1 query text, $2 limit; filterSQL's clauses follow.
+//
+// Candidates: the query is normalised into lexemes by the same dictionary that
+// built the index, and a chunk is a candidate if it contains any of them. The
+// lexemes are OR-ed, not AND-ed as websearch_to_tsquery would: a model sends a
+// whole question, and requiring every one of ten lexemes in a 1,200-character
+// chunk matches essentially nothing (measured: recall@8 of 0.15 against 0.85
+// for OR). quote_literal keeps operator characters from being parsed as
+// tsquery syntax.
+//
+// Ranking: the candidate set is the same one ts_rank_cd used to rank, and
+// ts_rank_cd was the problem. It weighs every query lexeme alike, so on a
+// case-name query a string citation repeating "v." outranked the one chunk
+// naming the case. BM25 weights each lexeme by its IDF (lexeme_stats),
+// saturates repeated occurrences, and normalises by chunk length
+// (chunk_lexical_length, corpus_lexical_stats). Measured on the stratified set, recall@8 went from
+// 0.217 to 0.831 on case_name queries and from 0.850 to 1.000 on paraphrases.
+//
+// A lexeme missing from lexeme_stats (added since the last refresh) counts as
+// unseen, the highest IDF; df is capped at the chunk count so stale statistics
+// cannot produce a negative IDF. A chunk missing from chunk_lexical_length is
+// ranked as average length. Before the first refresh every statistic is empty
+// and ranking falls back to term frequency alone, rather than returning nothing.
+var lexicalSearchSQL = fmt.Sprintf(`
+	WITH q AS (
+		SELECT DISTINCT lex FROM unnest(tsvector_to_array(to_tsvector('english', $1))) AS lex
+	), terms AS (
+		SELECT q.lex,
+		       ln(1 + (s.chunks - df.n + 0.5) / (df.n + 0.5)) AS idf
+		FROM q
+		CROSS JOIN corpus_lexical_stats s
+		LEFT JOIN lexeme_stats l ON l.lexeme = q.lex
+		CROSS JOIN LATERAL (SELECT LEAST(COALESCE(l.chunks, 0), s.chunks)::float8 AS n) df
+	), candidates AS (
+		SELECT c.id, c.tsv
+		FROM chunks c JOIN documents d ON d.id = c.document_id
+		WHERE c.tsv @@ to_tsquery('english', (SELECT string_agg(quote_literal(lex), ' | ') FROM q))%%s
+	), scored AS (
+		-- The inner join on terms matters. A candidate can match the tsquery
+		-- without sharing a lexeme with q, because to_tsquery re-stems each
+		-- quoted lexeme ("conting" becomes "cont"). Such a chunk has nothing
+		-- BM25 can score; with an outer join its score was NULL, and NULL sorts
+		-- first under DESC.
+		SELECT cand.id,
+		       sum(t.idf * t.tf * (%[1]g + 1) / (t.tf + %[1]g * (1 - %[2]g + %[2]g * len.ratio))) AS score
+		FROM candidates cand
+		CROSS JOIN corpus_lexical_stats s
+		LEFT JOIN chunk_lexical_length cl ON cl.id = cand.id
+		CROSS JOIN LATERAL (SELECT COALESCE(cl.length / NULLIF(s.avg_length, 0), 1) AS ratio) len
+		CROSS JOIN LATERAL (
+			SELECT terms.idf, COALESCE(array_length(u.positions, 1), 1)::float8 AS tf
+			FROM unnest(cand.tsv) u JOIN terms ON terms.lex = u.lexeme
+		) t
+		GROUP BY cand.id
+	)
+	SELECT `+hitColumns+`
+	FROM scored JOIN chunks c ON c.id = scored.id JOIN documents d ON d.id = c.document_id
+	ORDER BY scored.score DESC`+stableTiebreak+`
+	LIMIT $2`, bm25K1, bm25B)
+
+// SearchLexical ranks chunks against a natural-language query with BM25 (see
+// lexicalSearchSQL). A query whose every word is a stopword yields no lexemes
+// and therefore no hits, rather than an error.
 func (s *Store) SearchLexical(ctx context.Context, query string, limit int, f CorpusFilter) ([]SearchHit, error) {
 	args := []any{query, limit}
 	where, args := f.filterSQL(len(args), args)
-	rows, err := s.pool.Query(ctx, `
-		SELECT `+hitColumns+`
-		FROM chunks c JOIN documents d ON d.id = c.document_id,
-		     LATERAL (SELECT `+lexicalQuerySQL+` AS q) tq
-		WHERE tq.q IS NOT NULL AND c.tsv @@ tq.q`+where+`
-		ORDER BY ts_rank_cd(c.tsv, tq.q) DESC`+stableTiebreak+`
-		LIMIT $2`, args...)
+	rows, err := s.pool.Query(ctx, fmt.Sprintf(lexicalSearchSQL, where), args...)
 	if err != nil {
 		return nil, err
 	}
 	return scanHits(rows)
+}
+
+// RefreshLexicalStats recomputes the corpus statistics BM25 ranks with. It
+// scans every chunk's tsvector twice (a few seconds for 70,000 chunks), so
+// retrieval.Ingest calls it once per run rather than once per document.
+// CONCURRENTLY keeps searches reading the previous statistics meanwhile; the
+// transaction keeps the views from describing different corpora, and the order
+// matters: corpus_lexical_stats is computed from chunk_lexical_length.
+func (s *Store) RefreshLexicalStats(ctx context.Context) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	for _, view := range []string{"lexeme_stats", "chunk_lexical_length", "corpus_lexical_stats"} {
+		if _, err := tx.Exec(ctx, `REFRESH MATERIALIZED VIEW CONCURRENTLY `+view); err != nil {
+			return fmt.Errorf("refresh %s: %w", view, err)
+		}
+	}
+	return tx.Commit(ctx)
 }
 
 // CorpusStats reports what is ingested, for the eval results file and the

@@ -64,6 +64,8 @@ func run() error {
 		return migrate(ctx, os.Args[2:])
 	case "fetch":
 		return fetchCmd(ctx, os.Args[2:])
+	case "fetch-cap":
+		return fetchCAPCmd(ctx, os.Args[2:])
 	case "dedupe":
 		return dedupeCmd(ctx, os.Args[2:])
 	case "ingest":
@@ -89,6 +91,7 @@ commands:
   work      run a queue worker that executes claimed runs
   migrate   apply database migrations and exit
   fetch     pull court opinions from CourtListener into a JSONL corpus file
+  fetch-cap pull opinions from the Caselaw Access Project (no quota; stops at 2014)
   dedupe    collapse revisions of the same case in a corpus file (run before ingest)
   ingest    chunk, embed, and upsert a fetched corpus into Postgres
   eval      run an eval suite (eval retrieval | eval suite | eval record)

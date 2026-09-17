@@ -1,0 +1,15 @@
+{
+  "variant": "current",
+  "labels": "evals/retrieval/generated/stratified-case_name.yaml",
+  "cases": 17,
+  "modes": [
+    {
+      "mode": "bm25",
+      "recall_at_8": 0.21715686274509802,
+      "recall_at_20": 0.2574229691876751,
+      "recall_at_50": 0.3742296918767507,
+      "mrr": 0.1978710725482605,
+      "elapsed_ns": 11588134375
+    }
+  ]
+}

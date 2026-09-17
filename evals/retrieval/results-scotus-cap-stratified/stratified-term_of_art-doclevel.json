@@ -1,0 +1,48 @@
+{
+  "cases": 15,
+  "modes": [
+    {
+      "mode": "vector",
+      "recall_at_8": 0.6444444444444444,
+      "recall_at_20": 0.7333333333333333,
+      "recall_at_50": 0.7722222222222223,
+      "mrr": 1,
+      "elapsed_ns": 2764401500
+    },
+    {
+      "mode": "bm25",
+      "recall_at_8": 0.7,
+      "recall_at_20": 0.8055555555555556,
+      "recall_at_50": 0.9166666666666666,
+      "mrr": 1,
+      "elapsed_ns": 12878758167
+    },
+    {
+      "mode": "hybrid",
+      "recall_at_8": 0.7,
+      "recall_at_20": 0.7722222222222223,
+      "recall_at_50": 0.8944444444444444,
+      "mrr": 1,
+      "elapsed_ns": 13100279667
+    },
+    {
+      "mode": "hybrid+rerank",
+      "recall_at_8": 0.6944444444444445,
+      "recall_at_20": 0.7722222222222223,
+      "recall_at_50": 0.8944444444444444,
+      "mrr": 0.9333333333333333,
+      "elapsed_ns": 799424687625
+    }
+  ],
+  "corpus": {
+    "documents": 2484,
+    "chunks": 70736,
+    "embedding_models": [
+      "mxbai-embed-large"
+    ]
+  },
+  "embedding_model": "mxbai-embed-large",
+  "rerank_model": "qwen2.5:7b",
+  "labels": "evals/retrieval/generated/stratified-term_of_art-doclevel.yaml",
+  "generated_at": "2026-09-17T03:03:09.297875Z"
+}

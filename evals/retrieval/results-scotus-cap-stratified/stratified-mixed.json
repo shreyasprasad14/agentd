@@ -1,0 +1,48 @@
+{
+  "cases": 15,
+  "modes": [
+    {
+      "mode": "vector",
+      "recall_at_8": 0.5844444444444445,
+      "recall_at_20": 0.772063492063492,
+      "recall_at_50": 0.8977777777777779,
+      "mrr": 0.7522222222222222,
+      "elapsed_ns": 2833055042
+    },
+    {
+      "mode": "bm25",
+      "recall_at_8": 0.6073015873015872,
+      "recall_at_20": 0.7476190476190474,
+      "recall_at_50": 0.9777777777777779,
+      "mrr": 0.8444444444444444,
+      "elapsed_ns": 18175907416
+    },
+    {
+      "mode": "hybrid",
+      "recall_at_8": 0.6273015873015874,
+      "recall_at_20": 0.8038095238095238,
+      "recall_at_50": 0.9666666666666668,
+      "mrr": 0.8555555555555555,
+      "elapsed_ns": 18122841750
+    },
+    {
+      "mode": "hybrid+rerank",
+      "recall_at_8": 0.6273015873015872,
+      "recall_at_20": 0.8876190476190478,
+      "recall_at_50": 0.9666666666666668,
+      "mrr": 0.8722222222222222,
+      "elapsed_ns": 807698509333
+    }
+  ],
+  "corpus": {
+    "documents": 2484,
+    "chunks": 70736,
+    "embedding_models": [
+      "mxbai-embed-large"
+    ]
+  },
+  "embedding_model": "mxbai-embed-large",
+  "rerank_model": "qwen2.5:7b",
+  "labels": "evals/retrieval/generated/stratified-mixed.yaml",
+  "generated_at": "2026-09-16T21:52:52.264322Z"
+}

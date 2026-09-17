@@ -164,7 +164,7 @@ func evalSuiteCmd(ctx context.Context, args []string, record bool) error {
 		fmt.Print(s)
 		fmt.Println()
 	}
-	fmt.Println("  retrieval quality is scored separately: make eval-retrieval (evals/retrieval/results.json)")
+	fmt.Println("  retrieval quality is scored separately: make eval-retrieval (writes evals/retrieval/results-scotus-cap.json)")
 	fmt.Println()
 
 	if err := writeEvalResults(*resultsPath, rep, emb.Model(), *cassetteDir); err != nil {

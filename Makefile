@@ -12,15 +12,21 @@ ANTHROPIC_MODEL ?= claude-opus-5
 SANDBOX_IMAGE ?= agentd/sandbox:python
 COURT ?= scotus
 LIMIT ?= 2500
-CORPUS ?= data/corpus/$(COURT).jsonl
+## REPORTER is the Caselaw Access Project reporter slug `make fetch-cap` walks:
+## "us" is United States Reports. See ADR-40.
+REPORTER ?= us
+## CORPUS defaults to the CAP pull, which is the corpus the retrieval numbers
+## are measured on. `make fetch-corpus CORPUS=data/corpus/$(COURT).jsonl` still
+## pulls from CourtListener for anything more recent than 2014.
+CORPUS ?= data/corpus/$(COURT)-cap.jsonl
 ## CORPUS_DEDUP holds one document per case; it is what the retrieval
 ## benchmark measures against. See `make dedupe` and ADR-39.
-CORPUS_DEDUP ?= data/corpus/$(COURT)-dedup.jsonl
+CORPUS_DEDUP ?= $(CORPUS:.jsonl=-dedup.jsonl)
 
 JAEGER_UI ?= http://localhost:16686
 PROMETHEUS_UI ?= http://localhost:9090
 
-.PHONY: build test test-short test-sandbox test-retrieval test-live test-live-anthropic up down logs migrate serve work demo demo-anthropic demo-python demo-legal demo-budget demo-cancel compare crash-demo trace metrics model-pull sandbox-build fetch-corpus dedupe ingest ingest-fixture eval eval-record eval-live eval-record-live eval-retrieval fmt vet
+.PHONY: build test test-short test-sandbox test-retrieval test-live test-live-anthropic up down logs migrate serve work demo demo-anthropic demo-python demo-legal demo-budget demo-cancel compare crash-demo trace metrics model-pull sandbox-build fetch-cap fetch-corpus dedupe ingest ingest-fixture eval eval-record eval-live eval-record-live eval-retrieval fmt vet
 
 build:
 	go build ./...
@@ -84,7 +90,17 @@ model-pull:
 test-retrieval:
 	go test ./internal/retrieval/... ./internal/store -run 'TestIngest|TestSearch|TestGetDocument' -count=1 -timeout 300s
 
-## fetch-corpus pulls opinions from CourtListener into $(CORPUS). Set
+## fetch-cap pulls opinions from the Caselaw Access Project into $(CORPUS).
+## No token and no quota: the data is static files behind a CDN, one request
+## per volume rather than two per opinion, which is what makes a corpus of a
+## few thousand documents a five-minute job instead of a forty-day one. The
+## tradeoff is recency — CAP's U.S. Reports stop at 2014. See ADR-40.
+fetch-cap:
+	go run ./cmd/agentd fetch-cap -reporter $(REPORTER) -court $(COURT) -limit $(LIMIT) -out $(CORPUS)
+
+## fetch-corpus pulls opinions from CourtListener instead, which is current to
+## the day but allows 125 requests a day on the free tier — roughly 60 opinions.
+## Use it to top up a CAP corpus with recent cases, not to build one. Set
 ## COURTLISTENER_TOKEN for authenticated rate limits; re-running resumes.
 fetch-corpus:
 	go run ./cmd/agentd fetch -court $(COURT) -filed-after 2010-01-01 -limit $(LIMIT) -out $(CORPUS)
@@ -97,9 +113,18 @@ fetch-corpus:
 dedupe:
 	go run ./cmd/agentd dedupe -in $(CORPUS) -out $(CORPUS_DEDUP)
 
-## ingest chunks, embeds (via Ollama), and upserts the fetched corpus.
-ingest:
-	go run ./cmd/agentd ingest -dsn "$(DSN)" -file $(CORPUS) -model-url "$(MODEL_URL)" -embed-model $(EMBED_MODEL)
+## ingest chunks, embeds (via Ollama), and upserts $(CORPUS_DEDUP) — the
+## deduplicated corpus, not the raw pull. This target used to read $(CORPUS),
+## which quietly undid `make dedupe`: ingest upserts by source_id, so loading
+## the raw file after the deduplicated one leaves the displaced revisions in
+## the database rather than replacing them, and the corpus the benchmark runs
+## against stops matching the one its labels were written for. Run `make
+## dedupe` first; ADR-39 is why the two files are separate.
+ingest: $(CORPUS_DEDUP)
+	go run ./cmd/agentd ingest -dsn "$(DSN)" -file $(CORPUS_DEDUP) -model-url "$(MODEL_URL)" -embed-model $(EMBED_MODEL)
+
+$(CORPUS_DEDUP): $(CORPUS)
+	go run ./cmd/agentd dedupe -in $(CORPUS) -out $(CORPUS_DEDUP)
 
 ## ingest-fixture loads the 12-opinion test fixture, enough for demo-legal
 ## and the smoke eval without a CourtListener pull.
@@ -107,9 +132,14 @@ ingest-fixture:
 	go run ./cmd/agentd ingest -dsn "$(DSN)" -file evals/retrieval/fixture.jsonl -model-url "$(MODEL_URL)" -embed-model $(EMBED_MODEL)
 
 ## eval-retrieval prints recall@k and MRR per mode over the labeled query set
-## and exits nonzero below the thresholds in labels.yaml.
+## and exits nonzero below the thresholds in $(LABELS). It defaults to the
+## real corpus; LABELS=evals/retrieval/labels.yaml scores the 12-opinion
+## fixture instead, which runs anywhere in seconds and saturates.
+LABELS ?= evals/retrieval/labels-scotus-cap.yaml
+RESULTS ?= evals/retrieval/results-scotus-cap.json
 eval-retrieval:
-	go run ./cmd/agentd eval retrieval -dsn "$(DSN)" -model-url "$(MODEL_URL)" -embed-model $(EMBED_MODEL)
+	go run ./cmd/agentd eval retrieval -dsn "$(DSN)" -model-url "$(MODEL_URL)" -embed-model $(EMBED_MODEL) \
+		-labels $(LABELS) -results $(RESULTS)
 
 ## eval replays the checked-in cassettes through the real loop and prints the
 ## scorecard. No model, no API key, no network: Postgres is the only

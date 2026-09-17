@@ -1,0 +1,284 @@
+# GENERATED FILE — do not edit by hand.
+#
+# The 63 non-paraphrase cases at document level: ordinals stripped, one entry per distinct source_id.
+#
+# Source:  evals/retrieval/labels-scotus-cap-stratified.yaml (all labels are unreviewed drafts; see that file's header)
+# Corpus:  data/corpus/scotus-cap-dedup.jsonl, chunk offsets from the agentd database
+# Command: go run ./cmd/evalstrat convert 
+#
+# Paragraph-level labels were mapped to every chunk whose [char_start, char_end)
+# overlaps the paragraph's byte span; each paragraph label is one relevant
+# entry, so recall counts paragraphs, not chunks. Document-level labels keep
+# source_id only. No thresholds: this file reports numbers, it does not gate.
+# Mapping checks: mapping-checks.json in this directory.
+
+cases:
+  - query: 15 U.S.C. § 1681m(a) when is an insurance rate increase based on a credit report
+    relevant:
+      - source_id: cap-3573430
+  - query: 28 U.S.C. § 994(h) maximum term authorized includes statutory recidivist enhancements
+    relevant:
+      - source_id: cap-11652916
+      - source_id: cap-3674133
+  - query: 42 U.S.C. § 1396p(a) anti-lien provision and a state's claim on a Medicaid beneficiary's tort settlement
+    relevant:
+      - source_id: cap-12407746
+      - source_id: cap-3276324
+  - query: 26 U.S.C. § 6321 federal tax lien on an inheritance the taxpayer disclaimed under state law
+    relevant:
+      - source_id: cap-9476074
+  - query: 11 U.S.C. § 523(a)(2)(A) what level of reliance must a creditor show
+    relevant:
+      - source_id: cap-323761
+      - source_id: cap-3674023
+  - query: 8 U.S.C. § 1231(a)(6) detention of inadmissible aliens beyond the 90-day removal period
+    relevant:
+      - source_id: cap-3442797
+      - source_id: cap-9313599
+      - source_id: cap-9031152
+  - query: 28 U.S.C. § 636(b)(1)(B) prisoner petitions challenging conditions of confinement isolated incident
+    relevant:
+      - source_id: cap-6218684
+      - source_id: cap-9108401
+  - query: 11 U.S.C. § 522(l) trustee objection to claimed exemption after 30 days
+    relevant:
+      - source_id: cap-6237415
+      - source_id: cap-3641718
+  - query: 29 U.S.C. § 1103(c)(1) anti-inurement provision employer use of pension plan surplus
+    relevant:
+      - source_id: cap-11076610
+      - source_id: cap-5882913
+  - query: 21 U.S.C. § 802(44) felony drug offense state misdemeanor punishable by more than one year
+    relevant:
+      - source_id: cap-3674213
+  - query: 28 U.S.C. § 1915(d) is an in forma pauperis complaint that fails Rule 12(b)(6) automatically frivolous
+    relevant:
+      - source_id: cap-605680
+      - source_id: cap-11727595
+  - query: 42 U.S.C. § 406(b) contingent-fee agreement versus lodestar for Social Security attorney fees
+    relevant:
+      - source_id: cap-353782
+  - query: 28 U.S.C. § 1367(d) tolling for state-law claims against a nonconsenting State dismissed on Eleventh Amendment grounds
+    relevant:
+      - source_id: cap-9108418
+      - source_id: cap-9030949
+  - query: 28 U.S.C. § 1500 Court of Federal Claims jurisdiction when a suit on the same operative facts is pending in district court
+    relevant:
+      - source_id: cap-4225347
+      - source_id: cap-12197
+  - query: 328 U.S. 680 walking time on the employer's premises before the workday
+    relevant:
+      - source_id: cap-5923137
+      - source_id: cap-12701987
+  - query: 18 U.S.C. § 3582(c)(2) does Booker make the sentence reduction policy statement advisory
+    relevant:
+      - source_id: cap-3641961
+      - source_id: cap-6023823
+  - query: United States v. Bess federal tax lien attaches consequences to rights created under state law
+    relevant:
+      - source_id: cap-354232
+      - source_id: cap-9476074
+  - query: Brown v. Felsen consent judgment and whether a bankruptcy court can look behind it to find fraud
+    relevant:
+      - source_id: cap-9030733
+      - source_id: cap-323790
+      - source_id: cap-6223600
+  - query: Baxter v. Palmigiano adverse inference from refusal to testify in civil or prison disciplinary proceedings
+    relevant:
+      - source_id: cap-1254852
+      - source_id: cap-11133167
+      - source_id: cap-11503514
+      - source_id: cap-11471404
+      - source_id: cap-13683
+      - source_id: cap-9508173
+  - query: Garrity v. New Jersey public employees forced to choose between self-incrimination and losing their jobs
+    relevant:
+      - source_id: cap-12698466
+      - source_id: cap-1254852
+  - query: United States v. Nardello generic definition of extortion regardless of state label
+    relevant:
+      - source_id: cap-9191165
+      - source_id: cap-634101
+      - source_id: cap-3573210
+      - source_id: cap-11728850
+  - query: Leng May Ma v. Barber alien paroled into the country has not entered the United States
+    relevant:
+      - source_id: cap-355876
+      - source_id: cap-9313599
+      - source_id: cap-5884234
+      - source_id: cap-6228898
+  - query: Myers v. Bethlehem Shipbuilding Corp. exhaustion of administrative remedies before judicial relief
+    relevant:
+      - source_id: cap-3500482
+      - source_id: cap-6222886
+      - source_id: cap-6227285
+      - source_id: cap-12032774
+  - query: Tennessee Coal v. Muscoda definition of work under the Fair Labor Standards Act
+    relevant:
+      - source_id: cap-5923137
+      - source_id: cap-5910239
+      - source_id: cap-5044
+  - query: Hagans v. Lavine jurisdictional questions decided sub silentio are not binding precedent
+    relevant:
+      - source_id: cap-5917929
+      - source_id: cap-6210401
+      - source_id: cap-9300919
+  - query: Carlson v. Landon Attorney General discretion to detain deportable aliens without bail
+    relevant:
+      - source_id: cap-6228898
+      - source_id: cap-9031152
+      - source_id: cap-6214309
+      - source_id: cap-9313599
+      - source_id: cap-6221371
+  - query: Heikkila v. Barber habeas corpus review of deportation orders when statutory review is precluded
+    relevant:
+      - source_id: cap-9313153
+      - source_id: cap-9313599
+  - query: Lonchar v. Thomas dismissing a first federal habeas petition filed at the eleventh hour
+    relevant:
+      - source_id: cap-11744701
+      - source_id: cap-3275461
+  - query: Sims v. Apfel issue exhaustion in a request for Appeals Council review
+    relevant:
+      - source_id: cap-9413232
+      - source_id: cap-3500482
+  - query: United States v. Murdock willfully means a bad purpose in criminal tax statutes
+    relevant:
+      - source_id: cap-6221945
+      - source_id: cap-11181885
+      - source_id: cap-3573430
+  - query: Ott v. Mississippi Valley Barge Line fairly apportioned state property tax on vessels
+    relevant:
+      - source_id: cap-3657928
+  - query: Kwong Hai Chew v. Colding resident alien is a person protected by the Fifth Amendment
+    relevant:
+      - source_id: cap-11182943
+      - source_id: cap-5121
+      - source_id: cap-9313599
+      - source_id: cap-355876
+  - query: Houghton v. Shafer prisoner need not pursue a futile administrative appeal
+    relevant:
+      - source_id: cap-6222886
+      - source_id: cap-6218684
+  - query: does a prisoner who files an untimely grievance satisfy the proper exhaustion requirement
+    relevant:
+      - source_id: cap-3500482
+      - source_id: cap-3553543
+  - query: can a nonparty be bound by a prior judgment under a theory of virtual representation
+    relevant:
+      - source_id: cap-3674228
+      - source_id: cap-4335674
+  - query: when does judicial estoppel prevent a party from taking a position inconsistent with one a court previously accepted
+    relevant:
+      - source_id: cap-9302102
+      - source_id: cap-3276046
+      - source_id: cap-3582065
+  - query: can a federal court remand a suit for damages to state court under Burford abstention
+    relevant:
+      - source_id: cap-11746454
+      - source_id: cap-1248520
+  - query: does the Rooker-Feldman doctrine divest a federal court of jurisdiction over a parallel suit once the state court enters judgment
+    relevant:
+      - source_id: cap-5920496
+      - source_id: cap-6006747
+  - query: is the in pari delicto defense available against an investor suing to rescind a purchase of unregistered securities
+    relevant:
+      - source_id: cap-6222106
+  - query: can a lawsuit filed with probable cause lose Noerr antitrust immunity under the sham exception because of anticompetitive motive
+    relevant:
+      - source_id: cap-11789
+      - source_id: cap-1254794
+      - source_id: cap-12706997
+      - source_id: cap-4335054
+  - query: must evidence be suppressed when police violate the knock-and-announce rule while executing a valid warrant
+    relevant:
+      - source_id: cap-3276422
+  - query: can a federal tax lien attach to one spouse's interest in property held as tenants by the entirety
+    relevant:
+      - source_id: cap-354232
+      - source_id: cap-5907297
+  - query: when is an abbreviated quick look analysis enough to condemn a professional association's advertising restrictions
+    relevant:
+      - source_id: cap-11133724
+      - source_id: cap-3276255
+      - source_id: cap-12698465
+  - query: may a sentencing court use the modified categorical approach when the statute of conviction is indivisible
+    relevant:
+      - source_id: cap-12698469
+      - source_id: cap-12706988
+  - query: does the plain statement rule keep the ADEA from reaching a state constitution's mandatory retirement age for appointed judges
+    relevant:
+      - source_id: cap-1108302
+      - source_id: cap-1339193
+      - source_id: cap-5883694
+  - query: can a prior fraud judgment have collateral estoppel effect in a bankruptcy dischargeability proceeding
+    relevant:
+      - source_id: cap-6223600
+      - source_id: cap-323790
+      - source_id: cap-9030733
+  - query: does due process allow res judicata to bar taxpayers who were not parties to an earlier suit against the same county tax
+    relevant:
+      - source_id: cap-11746778
+      - source_id: cap-11132941
+      - source_id: cap-3674228
+  - query: can a habeas lawyer's egregious misconduct justify equitable tolling of AEDPA's one-year deadline
+    relevant:
+      - source_id: cap-3641601
+      - source_id: cap-3553684
+      - source_id: cap-12186229
+      - source_id: cap-12187257
+  - query: can a civil rights plaintiff who recovers only nominal damages be denied attorney's fees under 42 U.S.C. § 1988 even though he is a prevailing party
+    relevant:
+      - source_id: cap-11925002
+      - source_id: cap-9301812
+  - query: after Coy v. Iowa, may a child abuse victim testify by one-way closed circuit television outside the defendant's presence
+    relevant:
+      - source_id: cap-6220020
+      - source_id: cap-6226656
+  - query: are Miranda v. Arizona warnings adequate if police say an appointed lawyer will be provided only once the suspect goes to court
+    relevant:
+      - source_id: cap-6213318
+      - source_id: cap-5861325
+  - query: under Strickland v. Washington what prejudice must a defendant show when his lawyer never conveyed a plea offer that then expired
+    relevant:
+      - source_id: cap-12188490
+      - source_id: cap-12188541
+  - query: is a state marijuana distribution conviction that could cover sharing a small amount for free an aggravated felony under 8 U.S.C. § 1101(a)(43)(B)
+    relevant:
+      - source_id: cap-12697041
+  - query: does 42 U.S.C. § 2000e-2(m) require direct evidence of discrimination before a jury can get a mixed-motive instruction
+    relevant:
+      - source_id: cap-8897257
+      - source_id: cap-3658005
+  - query: can a lodestar fee award under 42 U.S.C. § 1988 be enhanced because counsel's performance and results were superior
+    relevant:
+      - source_id: cap-3581942
+  - query: may EPA weigh costs against benefits when setting best technology available standards for cooling water intake structures under 33 U.S.C. § 1326(b)
+    relevant:
+      - source_id: cap-3653760
+  - query: can parents get tuition reimbursement under IDEA for a private school that does not meet the state standards in 20 U.S.C. § 1401(a)(18)
+    relevant:
+      - source_id: cap-230315
+      - source_id: cap-3658126
+  - query: given Ohralik v. Ohio State Bar Assn., may a state flatly ban lawyers' truthful targeted mail to people known to have a specific legal problem
+    relevant:
+      - source_id: cap-6219390
+      - source_id: cap-1564170
+      - source_id: cap-3573355
+  - query: does 42 U.S.C. § 1395x(v)(1)(A)(ii) let HHS reissue Medicare cost-limit rules with retroactive effect
+    relevant:
+      - source_id: cap-1494999
+  - query: after Hodel v. Irving, does the 1984 amended escheat provision of the Indian Land Consolidation Act still take property without just compensation
+    relevant:
+      - source_id: cap-11595355
+  - query: how should a federal court in a diversity case apply New York CPLR § 5501(c)'s excessive verdict standard without violating the Seventh Amendment
+    relevant:
+      - source_id: cap-1729749
+  - query: under United States v. Place, does walking a drug-detection dog around a car during a lawful traffic stop require reasonable suspicion
+    relevant:
+      - source_id: cap-5902584
+      - source_id: cap-5902037
+      - source_id: cap-12696458
+  - query: under Malley v. Briggs, are officers who executed an overbroad warrant approved by a magistrate entitled to qualified immunity
+    relevant:
+      - source_id: cap-12186811

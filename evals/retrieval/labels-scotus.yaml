@@ -1,5 +1,14 @@
 # Hand-labeled retrieval queries for the real CourtListener corpus.
 #
+# SUPERSEDED by labels-scotus-cap.yaml. The corpus this file labels was 84
+# documents because CourtListener's free tier allows 125 API requests a day;
+# the benchmark now runs against 2,484 SCOTUS merits opinions pulled from the
+# Caselaw Access Project, where top-8 is a selective slice rather than the top
+# 9.5% of everything there is. See ADR-40. This file is kept, and its ids are
+# still valid against `data/corpus/scotus-dedup.jsonl`, because the corpus it
+# describes is the one `results-scotus.json` was measured on and a result whose
+# inputs have been deleted is not a result.
+#
 # 84 distinct SCOTUS cases, one document each. evals/retrieval/labels.yaml is
 # the 12-opinion smoke fixture that runs anywhere in seconds and saturates;
 # this is the set that discriminates between the four modes.

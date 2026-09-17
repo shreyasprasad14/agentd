@@ -143,7 +143,8 @@ what went missing (ADR-39).
 Query is:
 
 1. vector top-k over pgvector HNSW
-2. lexical top-k over a GIN-indexed `tsvector`, ranked by `ts_rank_cd`
+2. lexical top-k over a GIN-indexed `tsvector`, ranked by Okapi BM25 against corpus statistics
+   that ingest refreshes (ADR-41)
 3. fused with Reciprocal Rank Fusion
 4. reranked to the final k by an LLM reranker
 5. returned with document ids and paragraph ordinals, so the answer can cite
